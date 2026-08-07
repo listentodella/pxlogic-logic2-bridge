@@ -141,12 +141,13 @@ Line Tools, it can still be started directly:
 
 ```sh
 node tools/logic2-bridge/index.cjs \
-  --app "/Applications/Saleae Logic.app" \
-  --screen-quadrant 3
+  --app "/Applications/Saleae Logic.app"
 ```
 
 The launcher starts a private GraphServer, exposes an automatically allocated
 Logic-facing endpoint, then launches the official app with `--useExistingGraph`.
+Logic opens maximized by default. Use `--screen-quadrant 1` through `4` only
+when a compact debugging layout is preferred.
 When capture starts, the bridge follows the channel, sample rate, and voltage
 settings sent by Logic 2 and starts PXLogic automatically. Use `--port 12472`
 to request a fixed port or `--port auto` explicitly.

@@ -7,6 +7,7 @@ const net = require('node:net');
 const { PassThrough } = require('node:stream');
 const {
   logicProcessEnvironment,
+  macMaximizeScript,
   nativeGraphStartupTimeoutMs,
   nativeHookArguments,
   parseArguments,
@@ -18,6 +19,15 @@ const {
 test('uses an automatically allocated public port by default', () => {
   assert.equal(parseArguments([]).port, 0);
   assert.equal(parseArguments(['--port', 'auto']).port, 0);
+  assert.equal(parseArguments([]).maximizeWindow, true);
+  assert.equal(parseArguments(['--screen-quadrant', '2']).maximizeWindow, false);
+});
+
+test('sizes the launched Logic window to the macOS visible desktop', () => {
+  const script = macMaximizeScript(4321);
+  assert.match(script, /NSScreen\.mainScreen/);
+  assert.match(script, /unixId: pid/);
+  assert.match(script, /windows\[0\]\.size/);
 });
 
 test('accepts a preferred public port', () => {

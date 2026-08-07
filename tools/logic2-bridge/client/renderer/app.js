@@ -140,11 +140,13 @@ async function inspectPath() {
 }
 
 function readSettings() {
+  const windowPosition = elements.screenQuadrant.value;
   return {
     logicAppPath: elements.logicPath.value.trim(),
     portMode,
     preferredPort: Number(elements.preferredPort.value),
-    screenQuadrant: Number(elements.screenQuadrant.value),
+    screenQuadrant: windowPosition === 'maximized' ? 3 : Number(windowPosition),
+    maximizeLogicWindow: windowPosition === 'maximized',
   };
 }
 
@@ -225,7 +227,9 @@ async function initialize() {
   renderApplications(initial.applications);
   elements.logicPath.value = initial.settings.logicAppPath;
   elements.preferredPort.value = initial.settings.preferredPort;
-  elements.screenQuadrant.value = String(initial.settings.screenQuadrant);
+  elements.screenQuadrant.value = initial.settings.maximizeLogicWindow === false
+    ? String(initial.settings.screenQuadrant)
+    : 'maximized';
   setPortMode(initial.settings.portMode);
   if (initial.logs.length) {
     elements.logOutput.textContent = initial.logs.slice(-120).join('\n');

@@ -44,6 +44,7 @@ function parseArguments(argv) {
     captureWindowMs: 1000,
     scanSaleaeDevices: false,
     screenQuadrant: undefined,
+    maximizeWindow: true,
     remoteDebuggingPort: undefined,
     allowPendingProfile: false,
     dryRun: false,
@@ -67,7 +68,11 @@ function parseArguments(argv) {
     else if (argument === '--threshold-volts') result.thresholdVolts = Number(argv[++index]);
     else if (argument === '--capture-window-ms') result.captureWindowMs = Number(argv[++index]);
     else if (argument === '--scan-saleae-devices') result.scanSaleaeDevices = true;
-    else if (argument === '--screen-quadrant') result.screenQuadrant = Number(argv[++index]);
+    else if (argument === '--screen-quadrant') {
+      result.screenQuadrant = Number(argv[++index]);
+      result.maximizeWindow = false;
+    }
+    else if (argument === '--maximize-window') result.maximizeWindow = true;
     else if (argument === '--remote-debugging-port') {
       result.remoteDebuggingPort = Number(argv[++index]);
     } else if (argument === '--allow-pending-profile') result.allowPendingProfile = true;
@@ -122,7 +127,8 @@ Options:
   --threshold-volts V        Initial nominal I/O level (default: 2.0)
   --capture-window-ms MS     PXLogic stream re-arm window (default: 1000)
   --scan-saleae-devices      Also let GraphServer scan physical Saleae devices
-  --screen-quadrant N        Place Logic in screen quadrant 1-4
+  --maximize-window          Maximize Logic after launch (default)
+  --screen-quadrant N        Place Logic in screen quadrant 1-4 instead
   --remote-debugging-port N  Enable Chromium remote debugging for this Logic process
   --allow-pending-profile    Run an exact-match experimental profile for live validation
   --dry-run                  Validate paths, version, and native host build without launching
@@ -167,6 +173,53 @@ function maximizeWindowsLogicWindow(pid) {
     windowsHide: true,
   });
   maximizer.unref();
+}
+
+function macMaximizeScript(pid) {
+  return `ObjC.import('AppKit');
+function run() {
+  const pid = ${pid};
+  const screen = $.NSScreen.mainScreen;
+  const frame = screen.frame;
+  const visible = screen.visibleFrame;
+  const bounds = {
+    x: Number(visible.origin.x),
+    y: Number(frame.size.height - visible.origin.y - visible.size.height),
+    width: Number(visible.size.width),
+    height: Number(visible.size.height),
+  };
+  const systemEvents = Application('System Events');
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const matches = systemEvents.applicationProcesses.whose({ unixId: pid })();
+    if (matches.length > 0) {
+      const process = matches[0];
+      process.frontmost = true;
+      const windows = process.windows();
+      if (windows.length > 0) {
+        windows[0].position = [bounds.x, bounds.y];
+        windows[0].size = [bounds.width, bounds.height];
+        return;
+      }
+    }
+    delay(0.2);
+  }
+}`;
+}
+
+function maximizeMacLogicWindow(pid) {
+  if (process.platform !== 'darwin' || !Number.isInteger(pid) || pid <= 0) return;
+  const maximizer = spawn('/usr/bin/osascript', [
+    '-l',
+    'JavaScript',
+    '-e',
+    macMaximizeScript(pid),
+  ], { stdio: 'ignore' });
+  maximizer.unref();
+}
+
+function maximizeLogicWindow(pid) {
+  maximizeWindowsLogicWindow(pid);
+  maximizeMacLogicWindow(pid);
 }
 
 function requirePath(target, label, kind = 'any') {
@@ -572,7 +625,9 @@ async function main() {
     console.log(`[logic2-bridge] Graph WebSocket ready: ws://127.0.0.1:${proxy.port}/saleae`);
 
     const logicArguments = ['--useExistingGraph', '--graphPort', String(proxy.port)];
-    if (options.screenQuadrant !== undefined) {
+    if (options.maximizeWindow) {
+      logicArguments.push('--start-maximized');
+    } else if (options.screenQuadrant !== undefined) {
       logicArguments.push('--screenQuadrant', String(options.screenQuadrant));
     }
     if (options.remoteDebuggingPort !== undefined) {
@@ -583,7 +638,7 @@ async function main() {
       env: logicProcessEnvironment(),
       stdio: 'inherit',
     });
-    maximizeWindowsLogicWindow(logic.pid);
+    if (options.maximizeWindow) maximizeLogicWindow(logic.pid);
     const exit = await waitForExit(logic);
     console.log(`[logic2-bridge] Logic exited (${exit.signal || exit.code})`);
     if (!stopping && exit.code) process.exitCode = exit.code;
@@ -603,6 +658,7 @@ async function main() {
 module.exports = {
   installedAppCandidates,
   logicProcessEnvironment,
+  macMaximizeScript,
   nativeGraphStartupTimeoutMs,
   nativeHookArguments,
   parseArguments,

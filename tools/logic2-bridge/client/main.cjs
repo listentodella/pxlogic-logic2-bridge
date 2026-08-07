@@ -19,6 +19,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   portMode: 'auto',
   preferredPort: 12472,
   screenQuadrant: 3,
+  maximizeLogicWindow: true,
 });
 
 let mainWindow;
@@ -55,6 +56,7 @@ function normalizeSettings(value = {}) {
     screenQuadrant: [1, 2, 3, 4].includes(screenQuadrant)
       ? screenQuadrant
       : DEFAULT_SETTINGS.screenQuadrant,
+    maximizeLogicWindow: value.maximizeLogicWindow !== false,
   };
 }
 
@@ -141,8 +143,9 @@ function startBridge(rawSettings) {
     'index.cjs',
     '--app', settings.logicAppPath,
     '--port', settings.portMode === 'auto' ? 'auto' : String(settings.preferredPort),
-    '--screen-quadrant', String(settings.screenQuadrant),
   ];
+  if (settings.maximizeLogicWindow) args.push('--maximize-window');
+  else args.push('--screen-quadrant', String(settings.screenQuadrant));
   setBridgeState({ phase: 'starting', actualPort: null, message: '正在启动' });
   logLines = [];
   bridgeProcess = spawn(process.execPath, args, {

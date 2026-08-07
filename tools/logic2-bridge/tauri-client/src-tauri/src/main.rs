@@ -34,6 +34,12 @@ struct ClientSettings {
     port_mode: String,
     preferred_port: u16,
     screen_quadrant: u8,
+    #[serde(default = "default_maximize_logic_window")]
+    maximize_logic_window: bool,
+}
+
+fn default_maximize_logic_window() -> bool {
+    true
 }
 
 impl Default for ClientSettings {
@@ -43,6 +49,7 @@ impl Default for ClientSettings {
             port_mode: "auto".to_string(),
             preferred_port: 12472,
             screen_quadrant: 3,
+            maximize_logic_window: true,
         }
     }
 }
@@ -1630,12 +1637,16 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
         .args(["--pxlogic-helper", &helper])
         .args(["--bitstreams", &bitstreams])
         .args(["--firmware", &firmware])
-        .args(["--screen-quadrant", &settings.screen_quadrant.to_string()])
         .current_dir(&payload.bridge_root)
         .env("ELECTRON_RUN_AS_NODE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if settings.maximize_logic_window {
+        command.arg("--maximize-window");
+    } else {
+        command.args(["--screen-quadrant", &settings.screen_quadrant.to_string()]);
+    }
     if inspection.hook_status.as_deref() == Some("pending-live-validation") {
         command.arg("--allow-pending-profile");
     }
@@ -1837,12 +1848,23 @@ mod tests {
             port_mode: "unexpected".to_string(),
             preferred_port: 43210,
             screen_quadrant: 9,
+            maximize_logic_window: true,
         }
         .normalized();
         assert_eq!(settings.logic_app_path, "/Applications/Saleae Logic.app");
         assert_eq!(settings.port_mode, "auto");
         assert_eq!(settings.preferred_port, 43210);
         assert_eq!(settings.screen_quadrant, 3);
+        assert!(settings.maximize_logic_window);
+    }
+
+    #[test]
+    fn migrates_legacy_settings_to_maximized_window() {
+        let settings: ClientSettings = serde_json::from_str(
+            r#"{"logicAppPath":"","portMode":"auto","preferredPort":12472,"screenQuadrant":3}"#,
+        )
+        .unwrap();
+        assert!(settings.maximize_logic_window);
     }
 
     #[test]

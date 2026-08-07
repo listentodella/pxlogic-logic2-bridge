@@ -713,7 +713,7 @@ static bool set_code_page_protection(void *address, size_t length,
                                      DWORD protection, DWORD *previous) {
   return VirtualProtect(address, length, protection, previous) != 0;
 }
-#else
+#elif defined(__linux__)
 static bool set_code_page_protection(void *address, size_t length, int protection) {
   const size_t page_size = (size_t)getpagesize();
   const uintptr_t begin = (uintptr_t)address & ~(page_size - 1u);
