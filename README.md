@@ -10,6 +10,13 @@ the helper. It does not contain or modify Saleae Logic itself.
 ## Development checks
 
 ```sh
+npm --prefix tools/logic2-bridge/client ci
+npm --prefix tools/logic2-bridge/tauri-client ci
+
+# Or install both UI/runtime workspaces from the repository root with pnpm.
+pnpm install
+pnpm tauri dev
+
 npm --prefix tools/logic2-bridge ci
 npm --prefix tools/logic2-bridge check
 npm --prefix tools/logic2-bridge test

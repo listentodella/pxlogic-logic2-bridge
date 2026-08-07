@@ -1,4 +1,5 @@
 /target/
+/node_modules/
 /tools/logic2-bridge/build/
 /tools/logic2-bridge/client/node_modules/
 /tools/logic2-bridge/client/dist/

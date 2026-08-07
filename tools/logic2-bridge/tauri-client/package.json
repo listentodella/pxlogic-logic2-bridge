@@ -5,6 +5,8 @@
   "description": "Lightweight desktop launcher for the PXLogic Logic 2 live bridge",
   "scripts": {
     "prepare:payload": "node ../client/scripts/prepare-payload.cjs",
+    "dev": "tauri dev",
+    "build": "npm run prepare:payload && tauri build",
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "build:mac": "npm run prepare:payload && tauri build --target aarch64-apple-darwin"
