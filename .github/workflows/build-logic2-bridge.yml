@@ -19,10 +19,9 @@ on:
       platform:
         description: Platform builds to run
         required: true
-        default: self-hosted
+        default: all
         type: choice
         options:
-          - self-hosted
           - analysis-only
           - windows
           - linux
@@ -185,11 +184,10 @@ jobs:
     if: >-
       ${{
         github.event_name == 'push' ||
-        inputs.platform == 'self-hosted' ||
         inputs.platform == 'linux' ||
         inputs.platform == 'all'
       }}
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -222,11 +220,11 @@ jobs:
       matrix:
         include:
           - os_name: Linux x64
-            runner: [self-hosted, Linux, X64]
+            runner: ubuntu-24.04
             package_type: appimage
             artifact: linux-x64
           - os_name: Windows x64
-            runner: [self-hosted, Windows, X64]
+            runner: windows-2025
             package_type: advanced-installer
             artifact: windows-x64
     runs-on: ${{ matrix.runner }}
@@ -434,12 +432,11 @@ jobs:
     if: >-
       ${{
         github.event_name == 'push' ||
-        inputs.platform == 'self-hosted' ||
         inputs.platform == 'linux' ||
         inputs.platform == 'all'
       }}
     needs: [linux-native-host-check]
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -555,11 +552,10 @@ jobs:
     if: >-
       ${{
         github.event_name == 'push' ||
-        inputs.platform == 'self-hosted' ||
         inputs.platform == 'windows' ||
         inputs.platform == 'all'
       }}
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: windows-2025
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
