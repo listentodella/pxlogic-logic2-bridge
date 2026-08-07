@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PXLogic Bridge",
+  "version": "0.3.0",
+  "identifier": "io.pxlogic.logic2bridge",
+  "build": {
+    "frontendDist": "../../client/renderer"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "PXLogic Bridge",
+        "width": 840,
+        "height": 680,
+        "minWidth": 720,
+        "minHeight": 590,
+        "center": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost; style-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "category": "Utility",
+    "shortDescription": "PXLogic live capture bridge for Saleae Logic 2",
+    "icon": [
+      "../../../../src-tauri/icons/icon.icns",
+      "../../../../src-tauri/icons/icon.ico",
+      "../../../../src-tauri/icons/icon.png"
+    ],
+    "resources": {
+      "../../index.cjs": "tools/logic2-bridge/index.cjs",
+      "../../lib": "tools/logic2-bridge/lib",
+      "../../compatibility": "tools/logic2-bridge/compatibility",
+      "../../../../resources/bitstreams/hspi_ddr.bin": "resources/bitstreams/hspi_ddr.bin",
+      "../../../../resources/bitstreams/hspi_ddr_RST.bin": "resources/bitstreams/hspi_ddr_RST.bin",
+      "../../../../resources/bitstreams/LICENSE.txt": "resources/bitstreams/LICENSE.txt",
+      "../../../../resources/firmware/SCI_LOGIC.bin": "resources/firmware/SCI_LOGIC.bin"
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": null
+    }
+  }
+}

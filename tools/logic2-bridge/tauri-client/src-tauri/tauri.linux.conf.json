@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "targets": ["appimage"],
+    "resources": {
+      "../../build/payload/graph-host": "tools/logic2-bridge/build/graph-host",
+      "../../build/payload/usb_smoke": "target/release/usb_smoke"
+    }
+  }
+}

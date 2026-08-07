@@ -1,0 +1,10 @@
+[package]
+name = "pxlogic-waveform"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+pxlogic-core = { path = "../pxlogic-core", default-features = false }
+serde.workspace = true
+thiserror.workspace = true

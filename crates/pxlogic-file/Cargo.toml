@@ -1,0 +1,13 @@
+[package]
+name = "pxlogic-file"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+pxlogic-core = { path = "../pxlogic-core", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zip.workspace = true

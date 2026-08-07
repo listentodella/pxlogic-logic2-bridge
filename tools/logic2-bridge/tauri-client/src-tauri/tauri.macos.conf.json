@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "targets": ["app"],
+    "resources": {
+      "../../build/payload/graph-host": "tools/logic2-bridge/build/graph-host",
+      "../../build/payload/usb_smoke": "target/release/usb_smoke"
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": null
+    }
+  }
+}

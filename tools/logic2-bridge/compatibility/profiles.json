@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "profiles": [
+    {
+      "id": "logic-2.4.46-macos-arm64-0df17631",
+      "logicVersion": "2.4.46",
+      "platform": "darwin",
+      "architecture": "arm64",
+      "runtimeLayout": "macos-app",
+      "graph": {
+        "relativePath": "Contents/Resources/macos-arm64/libgraph_server_shared.dylib",
+        "format": "mach-o",
+        "identityKind": "macho-lc-uuid",
+        "identity": "0DF17631-8E04-3501-A7B5-49A62E233FB0",
+        "sha256": "782d4bcfe6097ad0a9b6339499d00575d8042da1b6781027470e933b84f9a08a"
+      },
+      "hook": {
+        "status": "verified",
+        "onDataBufferOffset": "0x1df994",
+        "prologueHex": "ff8303d1f6570ba9f44f0ca9fd7b0da9",
+        "validation": "PXLogic live capture verified on official Logic 2.4.46"
+      }
+    },
+    {
+      "id": "logic-2.4.46-linux-x64-f82e8683",
+      "logicVersion": "2.4.46",
+      "platform": "linux",
+      "architecture": "x64",
+      "runtimeLayout": "linux-appdir",
+      "graph": {
+        "relativePath": "usr/lib/logic/resources/linux-x64/libgraph_server_shared.so",
+        "format": "elf",
+        "identityKind": "elf-gnu-build-id",
+        "identity": "f82e8683c47fcd77",
+        "sha256": "752efb9db9b65f283b13c93e2dfda1a330379bc9692f8435113a83529894b0db"
+      },
+      "hook": {
+        "status": "pending-live-validation",
+        "onDataBufferOffset": "0x1df3d10",
+        "prologueHex": "554157415641554154534881ecc8000000",
+        "validation": "ELF identity, SysV ABI, callback body, and prologue reverse-engineered; hardware capture not yet verified"
+      }
+    },
+    {
+      "id": "logic-2.4.46-windows-x64-888ecceb",
+      "logicVersion": "2.4.46",
+      "platform": "win32",
+      "architecture": "x64",
+      "runtimeLayout": "windows-installation",
+      "graph": {
+        "relativePath": "resources/windows-x64/graph_server_shared.dll",
+        "format": "pe",
+        "identityKind": "pe-codeview-guid-age",
+        "identity": "888ECCEB-C0E8-4943-8F4F-0F6F529F2ACA-1",
+        "sha256": "66b0562e5eb56c0fddaebecd4848a421df6affcdf0a641245ccecffe76054db2"
+      },
+      "hook": {
+        "status": "pending-live-validation",
+        "onDataBufferOffset": "0x50b750",
+        "prologueHex": "488bc448895810488970204c89401855",
+        "validation": "PE identity and OnDataBuffer candidate converged from signature-string references and the PE runtime-function table; Microsoft x64 indirect aggregate ABI and Windows patch path are implemented, but PXLogic hardware capture is not live-validated"
+      }
+    }
+  ]
+}

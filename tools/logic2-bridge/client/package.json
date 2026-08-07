@@ -1,0 +1,87 @@
+{
+  "name": "pxlogic-logic2-bridge-client",
+  "version": "0.2.0",
+  "description": "Desktop launcher for the PXLogic Logic 2 live bridge",
+  "author": "PXLogic Project",
+  "main": "main.cjs",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer/app.js",
+    "prepare:payload": "node scripts/prepare-payload.cjs",
+    "pack:mac": "npm run check && npm run prepare:payload && electron-builder --mac --arm64 --dir",
+    "dist:mac": "npm run check && npm run prepare:payload && electron-builder --mac dmg zip --arm64"
+  },
+  "devDependencies": {
+    "electron": "43.3.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "io.pxlogic.logic2bridge",
+    "productName": "PXLogic Bridge",
+    "artifactName": "PXLogic-Bridge-${version}-macos-${arch}.${ext}",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "renderer/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../index.cjs",
+        "to": "tools/logic2-bridge/index.cjs"
+      },
+      {
+        "from": "../lib",
+        "to": "tools/logic2-bridge/lib"
+      },
+      {
+        "from": "../compatibility",
+        "to": "tools/logic2-bridge/compatibility"
+      },
+      {
+        "from": "../build/graph-host",
+        "to": "tools/logic2-bridge/build/graph-host"
+      },
+      {
+        "from": "../../../target/aarch64-apple-darwin/release/usb_smoke",
+        "to": "target/release/usb_smoke"
+      },
+      {
+        "from": "../../../resources/bitstreams/hspi_ddr.bin",
+        "to": "resources/bitstreams/hspi_ddr.bin"
+      },
+      {
+        "from": "../../../resources/bitstreams/hspi_ddr_RST.bin",
+        "to": "resources/bitstreams/hspi_ddr_RST.bin"
+      },
+      {
+        "from": "../../../resources/bitstreams/LICENSE.txt",
+        "to": "resources/bitstreams/LICENSE.txt"
+      },
+      {
+        "from": "../../../resources/firmware/SCI_LOGIC.bin",
+        "to": "resources/firmware/SCI_LOGIC.bin"
+      },
+      {
+        "from": "../../../src-tauri/icons/icon.png",
+        "to": "icon.png"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "icon": "../../../src-tauri/icons/icon.icns",
+      "identity": null,
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "dmg": {
+      "title": "PXLogic Bridge ${version}"
+    }
+  }
+}

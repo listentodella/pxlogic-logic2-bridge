@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
+    <title>PXLogic Bridge</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="brand-copy">
+        <h1>PXLogic Bridge</h1>
+        <p>Logic 2 Live Capture</p>
+      </div>
+      <div id="status" class="status status-stopped">
+        <span class="status-dot"></span>
+        <span id="status-label">待机</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="settings-section">
+        <div class="section-heading">
+          <div>
+            <h2>Logic 2</h2>
+            <p id="logic-summary">正在检测安装...</p>
+          </div>
+          <button id="rescan-button" class="secondary-button" type="button">重新检测</button>
+        </div>
+
+        <label for="logic-path">应用路径</label>
+        <div class="path-row">
+          <input id="logic-path" list="logic-apps" type="text" spellcheck="false" autocomplete="off">
+          <datalist id="logic-apps"></datalist>
+          <button id="browse-button" class="secondary-button" type="button">浏览</button>
+        </div>
+        <div class="validation-row">
+          <span>版本</span>
+          <strong id="logic-version">--</strong>
+          <span>GraphServer</span>
+          <strong id="graph-fingerprint">--</strong>
+          <span id="logic-compatibility" class="compatibility">未检测</span>
+        </div>
+      </section>
+
+      <section class="settings-section connection-section">
+        <div class="section-heading compact-heading">
+          <div>
+            <h2>连接</h2>
+            <p id="port-summary">端口由系统自动分配</p>
+          </div>
+        </div>
+
+        <div class="field-grid">
+          <div>
+            <label>WebSocket 端口</label>
+            <div class="segmented" role="group" aria-label="WebSocket 端口模式">
+              <button id="port-auto" class="segment active" type="button" data-mode="auto">自动</button>
+              <button id="port-fixed" class="segment" type="button" data-mode="fixed">固定</button>
+            </div>
+          </div>
+          <div>
+            <label for="preferred-port">首选端口</label>
+            <input id="preferred-port" class="number-input" type="number" min="1" max="65535" value="12472" disabled>
+          </div>
+          <div>
+            <label for="screen-quadrant">窗口位置</label>
+            <select id="screen-quadrant">
+              <option value="1">左上</option>
+              <option value="2">右上</option>
+              <option value="3">左下</option>
+              <option value="4">右下</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <section class="activity-section">
+        <div class="activity-heading">
+          <div>
+            <h2>运行记录</h2>
+            <p id="endpoint-label">WebSocket --</p>
+          </div>
+          <button id="open-logs-button" class="quiet-button" type="button">打开日志目录</button>
+        </div>
+        <pre id="log-output" aria-live="polite">PXLogic Bridge 已就绪</pre>
+      </section>
+    </main>
+
+    <footer>
+      <p id="footer-message">使用所选 Logic 2 的内置 Node 运行 bridge</p>
+      <button id="start-button" class="primary-button" type="button">启动 Logic 2</button>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

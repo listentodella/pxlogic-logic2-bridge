@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "targets": ["nsis", "msi"],
+    "resources": {
+      "../../build/payload/graph-host.exe": "tools/logic2-bridge/build/graph-host.exe",
+      "../../build/payload/usb_smoke.exe": "target/release/usb_smoke.exe"
+    }
+  }
+}

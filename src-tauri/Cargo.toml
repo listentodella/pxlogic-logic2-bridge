@@ -1,0 +1,22 @@
+[package]
+name = "pxlogic-capture-helper"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "usb_smoke"
+path = "src/bin/usb_smoke.rs"
+
+[features]
+default = ["rusb-transport"]
+rusb-transport = ["pxlogic-core/rusb-transport"]
+
+[dependencies]
+base64.workspace = true
+pxlogic-core = { path = "../crates/pxlogic-core" }
+pxlogic-file = { path = "../crates/pxlogic-file" }
+pxlogic-graph = { path = "../crates/pxlogic-graph" }
+pxlogic-waveform = { path = "../crates/pxlogic-waveform" }
+serde.workspace = true
+serde_json.workspace = true

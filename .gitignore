@@ -1,0 +1,7 @@
+/target/
+/tools/logic2-bridge/build/
+/tools/logic2-bridge/client/node_modules/
+/tools/logic2-bridge/client/dist/
+/tools/logic2-bridge/tauri-client/node_modules/
+/tools/logic2-bridge/tauri-client/src-tauri/target/
+.DS_Store

@@ -1,0 +1,15 @@
+{
+  "name": "pxlogic-logic2-bridge-tauri-client",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Lightweight desktop launcher for the PXLogic Logic 2 live bridge",
+  "scripts": {
+    "prepare:payload": "node ../client/scripts/prepare-payload.cjs",
+    "check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "build:mac": "npm run prepare:payload && tauri build --target aarch64-apple-darwin"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}
