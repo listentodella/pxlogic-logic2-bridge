@@ -140,8 +140,12 @@ if (targetSettings.hostCompiler) {
 
 
 const helperHelp = spawnSync(helperDestination, ['--help'], { encoding: 'utf8' });
-if (helperHelp.status !== 0 || !helperHelp.stdout.includes('--live-cross-only')) {
-  throw new Error(`${helperDestination} does not implement the bridge --live-cross-only contract`);
+if (helperHelp.status !== 0 ||
+    !helperHelp.stdout.includes('--live-cross-only') ||
+    !helperHelp.stdout.includes('--list-json')) {
+  throw new Error(
+    `${helperDestination} does not implement the bridge live capture and device discovery contract`,
+  );
 }
 
 if (nativeDestination && process.platform !== 'win32') {

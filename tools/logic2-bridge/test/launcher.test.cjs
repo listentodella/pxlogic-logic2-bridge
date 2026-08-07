@@ -35,6 +35,21 @@ test('accepts a preferred public port', () => {
   assert.throws(() => parseArguments(['--port', '65536']), /Invalid port/);
 });
 
+test('accepts only PXView hardware threshold levels', () => {
+  assert.equal(
+    parseArguments(['--hardware-threshold-volts', '1.8']).hardwareThresholdVolts,
+    1.8,
+  );
+  assert.equal(
+    parseArguments(['--hardware-threshold-volts', '5.0']).hardwareThresholdVolts,
+    5.0,
+  );
+  assert.throws(
+    () => parseArguments(['--hardware-threshold-volts', '1.2']),
+    /Invalid PXLogic hardware threshold/,
+  );
+});
+
 test('requires an explicit opt-in for pending live-validation profiles', () => {
   assert.equal(parseArguments(['--allow-pending-profile']).allowPendingProfile, true);
   assert.equal(parseArguments([]).allowPendingProfile, false);

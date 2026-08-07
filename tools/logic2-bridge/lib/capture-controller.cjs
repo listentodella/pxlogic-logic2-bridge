@@ -322,12 +322,14 @@ class PxlogicCaptureController {
       );
     } else if (action.type === 'Saleae::Graph::LogicDevice::SetDigitalVoltageThreshold') {
       settings.thresholdVolts = parseThresholdVolts(action.thresholdDescription);
-      const comparator = Number.isFinite(settings.thresholdVolts)
-        ? `${settings.thresholdVolts * 0.5} V`
+      const hardwareLevel = this.options.hardwareThresholdVolts ?? settings.thresholdVolts;
+      const comparator = Number.isFinite(hardwareLevel)
+        ? `${hardwareLevel * 0.5} V`
         : 'unsupported';
       console.error(
         `[logic2-bridge:control] session=${sessionId ?? 'default'} ` +
-        `logic-level=${settings.thresholdVolts ?? 'unsupported'} V comparator~${comparator}`,
+        `logic-level=${settings.thresholdVolts ?? 'unsupported'} V ` +
+        `pxlogic-level=${hardwareLevel ?? 'unsupported'} V comparator~${comparator}`,
       );
     } else if (action.type === 'Saleae::Graph::DigitalTriggerSettingsData') {
       console.error(
@@ -359,12 +361,13 @@ class PxlogicCaptureController {
     const captureSettings = {
       enabledChannels: [...settings.enabledChannels],
       sampleRateHz: settings.sampleRateHz,
-      thresholdVolts: settings.thresholdVolts,
+      thresholdVolts: this.options.hardwareThresholdVolts ?? settings.thresholdVolts,
     };
     console.error(
       `[logic2-bridge:control] StartCapture session=${sessionId ?? 'default'} ` +
       `rate=${captureSettings.sampleRateHz} ` +
       `channels=D${captureSettings.enabledChannels.join(',D')} ` +
+      `pxlogic-level=${captureSettings.thresholdVolts} V ` +
       'pxlogic-hardware-glitch-filter=1T pxlogic-hardware-trigger=off',
     );
     const feeder = startPxlogicFeeder(this.options, this.host, captureSettings);

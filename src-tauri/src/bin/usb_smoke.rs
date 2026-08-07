@@ -38,6 +38,7 @@ struct Options {
     mode: CaptureMode,
     buffer_size_mb: u64,
     list_only: bool,
+    list_json: bool,
     prepare_only: bool,
     flash_mcu: bool,
     output: Option<PathBuf>,
@@ -81,6 +82,7 @@ impl Default for Options {
             mode: CaptureMode::Buffer,
             buffer_size_mb: 16,
             list_only: false,
+            list_json: false,
             prepare_only: false,
             flash_mcu: false,
             output: None,
@@ -114,6 +116,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_options()?;
     let backend = RusbBackend::default();
     let devices = backend.list_devices()?;
+    if options.list_json {
+        println!("{}", serde_json::to_string(&devices)?);
+        return Ok(());
+    }
     if devices.is_empty() {
         if options.list_only {
             println!("devices: none");
@@ -586,6 +592,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--live-cross-only" => options.live_cross_only = true,
             "--out" => options.output = Some(PathBuf::from(next_arg(&mut args, "--out")?)),
             "--list-only" => options.list_only = true,
+            "--list-json" => options.list_json = true,
             "--prepare-only" => options.prepare_only = true,
             "--flash-mcu" => options.flash_mcu = true,
             "--raw-cross" => options.decode_cross = false,
@@ -668,7 +675,7 @@ fn parse_enabled_channels(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "usb_smoke [--list-only] [--prepare-only] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--trigger-high-mask mask] [--trigger-low-mask mask] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--live] [--live-cross-only] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
+        "usb_smoke [--list-only|--list-json] [--prepare-only] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--trigger-high-mask mask] [--trigger-low-mask mask] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--live] [--live-cross-only] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
     );
 }
 

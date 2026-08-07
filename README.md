@@ -7,6 +7,17 @@ The repository contains the bridge protocol, native GraphServer host, Tauri
 launcher, PXLogic capture helper, and the firmware/FPGA resources required by
 the helper. It does not contain or modify Saleae Logic itself.
 
+The desktop launcher detects connected PXLogic devices, reports their model,
+serial number, and USB link speed, validates its packaged firmware/FPGA
+resources, and exposes PXView-compatible 1.8 V, 2.5 V, 3.3 V, and 5.0 V
+hardware-level choices. Logic 2 remains the source of truth for channels,
+sample rate, capture control, triggers, filters, and analyzers.
+
+When the launcher starts Logic 2, it also installs or refreshes three separate
+High Level Analyzer extensions: `QMI8660`, `QMI8658A`, and `QMA6100P`. Attach
+the matching HLA to Logic 2's built-in I2C or SPI analyzer to decode register
+names, fields, FIFO status, and physical sensor samples.
+
 ## Development checks
 
 ```sh

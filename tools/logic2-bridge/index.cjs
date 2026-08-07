@@ -20,6 +20,7 @@ const { startWebSocketProxy } = require('./lib/websocket-proxy.cjs');
 
 const bridgeRoot = __dirname;
 const pxlogicRoot = path.resolve(bridgeRoot, '..', '..');
+const PXVIEW_THRESHOLD_VOLTAGES = [1.8, 2.5, 3.3, 5.0];
 
 function parseArguments(argv) {
   const result = {
@@ -41,6 +42,7 @@ function parseArguments(argv) {
     enabledChannels: [0, 1, 2, 3],
     sampleRateHz: 25_000_000,
     thresholdVolts: 2.0,
+    hardwareThresholdVolts: undefined,
     captureWindowMs: 1000,
     scanSaleaeDevices: false,
     screenQuadrant: undefined,
@@ -66,6 +68,9 @@ function parseArguments(argv) {
       result.enabledChannels = normalizeEnabledChannels(argv[++index]);
     } else if (argument === '--sample-rate') result.sampleRateHz = Number(argv[++index]);
     else if (argument === '--threshold-volts') result.thresholdVolts = Number(argv[++index]);
+    else if (argument === '--hardware-threshold-volts') {
+      result.hardwareThresholdVolts = Number(argv[++index]);
+    }
     else if (argument === '--capture-window-ms') result.captureWindowMs = Number(argv[++index]);
     else if (argument === '--scan-saleae-devices') result.scanSaleaeDevices = true;
     else if (argument === '--screen-quadrant') {
@@ -93,6 +98,13 @@ function parseArguments(argv) {
   if (!Number.isFinite(result.thresholdVolts) ||
       result.thresholdVolts < 0 || result.thresholdVolts > 6.668) {
     throw new Error(`Invalid threshold voltage: ${result.thresholdVolts}`);
+  }
+  if (result.hardwareThresholdVolts !== undefined &&
+      !PXVIEW_THRESHOLD_VOLTAGES.includes(result.hardwareThresholdVolts)) {
+    throw new Error(
+      `Invalid PXLogic hardware threshold: ${result.hardwareThresholdVolts}; ` +
+      `expected ${PXVIEW_THRESHOLD_VOLTAGES.join(', ')}`,
+    );
   }
   if (!Number.isInteger(result.captureWindowMs) || result.captureWindowMs < 10) {
     throw new Error(`Invalid capture window: ${result.captureWindowMs}`);
@@ -125,6 +137,8 @@ Options:
   --enabled-channels LIST    Initial channels before Logic sends settings (default: 0,1,2,3)
   --sample-rate HZ           Initial sample rate (default: 25000000)
   --threshold-volts V        Initial nominal I/O level (default: 2.0)
+  --hardware-threshold-volts V
+                             Fixed PXLogic I/O level: 1.8, 2.5, 3.3, or 5.0
   --capture-window-ms MS     PXLogic stream re-arm window (default: 1000)
   --scan-saleae-devices      Also let GraphServer scan physical Saleae devices
   --maximize-window          Maximize Logic after launch (default)

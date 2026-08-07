@@ -1,0 +1,1901 @@
+{
+  "sensor": "QMI8658A",
+  "source": "qmi8658.yaml",
+  "pages": {
+    "0": {
+      "0": {
+        "name": "WHO_AM_I",
+        "access": "RO",
+        "width": 1,
+        "description": "芯片身份识别寄存器，默认值 0x05",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "who_am_i",
+            "bits": "7:0",
+            "description": "芯片身份识别值\n0x05 = QMI8658A/QST 传感器标识",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "1": {
+        "name": "REVISION_ID",
+        "access": "RO",
+        "width": 1,
+        "description": "芯片版本号寄存器；手册寄存器描述表给出默认值 0x7C，寄存器总览中列出 0x68",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "revision_id",
+            "bits": "7:0",
+            "description": "芯片版本号",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "2": {
+        "name": "CTRL1",
+        "access": "RW",
+        "width": 1,
+        "description": "串行接口和传感器基础控制寄存器，默认值 0x20",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "sim",
+            "bits": "7:7",
+            "description": "SPI 接口模式\n0 = 4 线 SPI\n1 = 3 线 SPI",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "addr_ai",
+            "bits": "6:6",
+            "description": "串行接口地址自增控制\n0 = 地址不自增\n1 = 地址自动递增",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "be",
+            "bits": "5:5",
+            "description": "串行接口读数据端序\n0 = 小端序\n1 = 大端序",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "int2_en",
+            "bits": "4:4",
+            "description": "INT2 引脚输出使能\n0 = INT2 高阻态\n1 = INT2 输出使能",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "int1_en",
+            "bits": "3:3",
+            "description": "INT1 引脚输出使能\n0 = INT1 高阻态\n1 = INT1 输出使能",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "fifo_int_sel",
+            "bits": "2:2",
+            "description": "FIFO 中断映射选择\n0 = FIFO 中断映射到 INT2\n1 = FIFO 中断映射到 INT1",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved",
+            "bits": "1:1",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "sensor_disable",
+            "bits": "0:0",
+            "description": "内部高速振荡器控制\n0 = 使能内部高速振荡器\n1 = 禁用内部高速振荡器",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "3": {
+        "name": "CTRL2",
+        "access": "RW",
+        "width": 1,
+        "description": "加速度计设置寄存器：自测、量程和输出数据率，默认值 0x00",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "ast",
+            "bits": "7:7",
+            "description": "加速度计自测使能\n0 = 禁用加速度计自测\n1 = 使能加速度计自测",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "afs",
+            "bits": "6:4",
+            "description": "加速度计量程选择\n0 = ±2g\n1 = ±4g\n2 = ±8g\n3 = ±16g\n4~7 = 不适用",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "aodr",
+            "bits": "3:0",
+            "description": "加速度计输出数据率（ODR）选择；低功耗模式仅在陀螺仪关闭时可用\n0 = 仅加速度计模式不可用，6DOF 7174.4Hz，普通模式，占空比 100%\n1 = 仅加速度计模式不可用，6DOF 3587.2Hz，普通模式，占空比 100%\n2 = 仅加速度计模式不可用，6DOF 1793.6Hz，普通模式，占空比 100%\n3 = 仅加速度计 1000Hz，6DOF 896.8Hz，普通模式，占空比 100%\n4 = 仅加速度计 500Hz，6DOF 448.4Hz，普通模式，占空比 100%\n5 = 仅加速度计 250Hz，6DOF 224.2Hz，普通模式，占空比 100%\n6 = 仅加速度计 125Hz，6DOF 112.1Hz，普通模式，占空比 100%\n7 = 仅加速度计 62.5Hz，6DOF 56.05Hz，普通模式，占空比 100%\n8 = 仅加速度计 31.25Hz，6DOF 28.025Hz，普通模式，占空比 100%\n9 = 不适用\n10 = 不适用\n11 = 不适用\n12 = 仅加速度计 128Hz，6DOF 不适用，低功耗模式，占空比 100%\n13 = 仅加速度计 21Hz，6DOF 不适用，低功耗模式，占空比 58%\n14 = 仅加速度计 11Hz，6DOF 不适用，低功耗模式，占空比 31%\n15 = 仅加速度计 3Hz，6DOF 不适用，低功耗模式，占空比 8.5%",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "4": {
+        "name": "CTRL3",
+        "access": "RW",
+        "width": 1,
+        "description": "陀螺仪设置寄存器：自测、量程和输出数据率，默认值 0x00",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "gst",
+            "bits": "7:7",
+            "description": "陀螺仪自测使能\n0 = 禁用陀螺仪自测\n1 = 使能陀螺仪自测",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "gfs",
+            "bits": "6:4",
+            "description": "陀螺仪量程选择\n0 = ±16dps\n1 = ±32dps\n2 = ±64dps\n3 = ±128dps\n4 = ±256dps\n5 = ±512dps\n6 = ±1024dps\n7 = ±2048dps",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "godr",
+            "bits": "3:0",
+            "description": "陀螺仪输出数据率（ODR）选择\n0 = 7174.4Hz，普通模式，占空比 100%\n1 = 3587.2Hz，普通模式，占空比 100%\n2 = 1793.6Hz，普通模式，占空比 100%\n3 = 896.8Hz，普通模式，占空比 100%\n4 = 448.4Hz，普通模式，占空比 100%\n5 = 224.2Hz，普通模式，占空比 100%\n6 = 112.1Hz，普通模式，占空比 100%\n7 = 56.05Hz，普通模式，占空比 100%\n8 = 28.025Hz，普通模式，占空比 100%\n9~15 = 不适用",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "5": {
+        "name": "RSVD_05",
+        "access": "RW",
+        "width": 1,
+        "description": "保留寄存器",
+        "roles": [
+
+        ],
+        "fields": [
+
+        ]
+      },
+      "6": {
+        "name": "CTRL5",
+        "access": "RW",
+        "width": 1,
+        "description": "传感器数据处理和低通滤波器设置寄存器，默认值 0x00",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "reserved7",
+            "bits": "7:7",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "glpf_mode",
+            "bits": "6:5",
+            "description": "陀螺仪低通滤波器带宽模式\n0 = ODR 的 2.66%\n1 = ODR 的 3.63%\n2 = ODR 的 5.39%\n3 = ODR 的 13.37%",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "glpf_en",
+            "bits": "4:4",
+            "description": "陀螺仪低通滤波器使能\n0 = 禁用陀螺仪低通滤波器\n1 = 使能陀螺仪低通滤波器，带宽由 gLPF_MODE 选择",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved3",
+            "bits": "3:3",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "alpf_mode",
+            "bits": "2:1",
+            "description": "加速度计低通滤波器带宽模式\n0 = ODR 的 2.66%\n1 = ODR 的 3.63%\n2 = ODR 的 5.39%\n3 = ODR 的 13.37%",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "alpf_en",
+            "bits": "0:0",
+            "description": "加速度计低通滤波器使能\n0 = 禁用加速度计低通滤波器\n1 = 使能加速度计低通滤波器，带宽由 aLPF_MODE 选择",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "7": {
+        "name": "RSVD_07",
+        "access": "RW",
+        "width": 1,
+        "description": "保留寄存器",
+        "roles": [
+
+        ],
+        "fields": [
+
+        ]
+      },
+      "8": {
+        "name": "CTRL7",
+        "access": "RW",
+        "width": 1,
+        "description": "传感器使能和数据读取配置寄存器，默认值 0x00",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "sync_sample",
+            "bits": "7:7",
+            "description": "SyncSample 模式使能\n0 = 禁用 SyncSample 模式\n1 = 使能 SyncSample 模式",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved6",
+            "bits": "6:6",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "drdy_dis",
+            "bits": "5:5",
+            "description": "DRDY 输出控制\n0 = DRDY 使能并输出到 INT2\n1 = DRDY 禁用，不输出到 INT2",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "gsn",
+            "bits": "4:4",
+            "description": "陀螺仪 Snooze 模式控制，仅在 gEN=1 时有效\n0 = 陀螺仪全功能模式\n1 = 陀螺仪 Snooze 模式",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved3_2",
+            "bits": "3:2",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "gen",
+            "bits": "1:1",
+            "description": "陀螺仪使能\n0 = 禁用陀螺仪\n1 = 使能陀螺仪",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "aen",
+            "bits": "0:0",
+            "description": "加速度计使能\n0 = 禁用加速度计\n1 = 使能加速度计",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "9": {
+        "name": "CTRL8",
+        "access": "RW",
+        "width": 1,
+        "description": "运动检测控制寄存器，默认值 0x00",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "ctrl9_handshake_type",
+            "bits": "7:7",
+            "description": "CTRL9 握手方式选择\n0 = 使用 INT1 作为 CTRL9 握手信号\n1 = 使用 STATUSINT.bit7 作为 CTRL9 握手状态",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "activity_int_sel",
+            "bits": "6:6",
+            "description": "活动检测事件中断引脚选择\n0 = 活动检测事件中断输出到 INT2\n1 = 活动检测事件中断输出到 INT1",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved5",
+            "bits": "5:5",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "pedo_en",
+            "bits": "4:4",
+            "description": "计步器引擎使能\n0 = 禁用计步器引擎\n1 = 使能计步器引擎",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "sig_motion_en",
+            "bits": "3:3",
+            "description": "显著运动检测使能\n0 = 禁用显著运动检测引擎\n1 = 使能显著运动检测引擎",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "no_motion_en",
+            "bits": "2:2",
+            "description": "无运动检测使能\n0 = 禁用无运动检测引擎\n1 = 使能无运动检测引擎",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "any_motion_en",
+            "bits": "1:1",
+            "description": "任意运动检测使能\n0 = 禁用任意运动检测引擎\n1 = 使能任意运动检测引擎",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "tap_en",
+            "bits": "0:0",
+            "description": "Tap 检测引擎使能\n0 = 禁用 Tap 检测引擎\n1 = 使能 Tap 检测引擎",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "10": {
+        "name": "CTRL9",
+        "access": "RW",
+        "width": 1,
+        "description": "主机命令寄存器。写入预定义命令值执行 CTRL9 协议；命令完成后 STATUSINT.ctrl9_cmd_done 置位，主机需写入 CTRL_CMD_ACK(0x00) 结束协议",
+        "roles": [
+          "host_command"
+        ],
+        "fields": [
+          {
+            "name": "command",
+            "bits": "7:0",
+            "description": "CTRL9 命令值\n0x00 = CTRL_CMD_ACK：确认命令完成并结束协议\n0x04 = CTRL_CMD_RST_FIFO：复位 FIFO\n0x05 = CTRL_CMD_REQ_FIFO：请求读取 FIFO 数据\n0x08 = CTRL_CMD_WRITE_WOM_SETTING：配置并使能运动唤醒（Wake on Motion）\n0x09 = CTRL_CMD_ACCEL_HOST_DELTA_OFFSET：修改加速度计偏移\n0x0A = CTRL_CMD_GYRO_HOST_DELTA_OFFSET：修改陀螺仪偏移\n0x0C = CTRL_CMD_CONFIGURE_TAP：配置 Tap 检测\n0x0D = CTRL_CMD_CONFIGURE_PEDOMETER：配置计步器\n0x0E = CTRL_CMD_CONFIGURE_MOTION：配置任意运动、无运动和显著运动检测\n0x0F = CTRL_CMD_RESET_PEDOMETER：复位计步器步数\n0x10 = CTRL_CMD_COPY_USID：复制 USID 和固件版本到 UI 寄存器\n0x11 = CTRL_CMD_SET_RPU：配置 IO 上拉电阻\n0x12 = CTRL_CMD_AHB_CLOCK_GATING：配置内部 AHB 时钟门控\n0xA2 = CTRL_CMD_ON_DEMAND_CALIBRATION：执行陀螺仪按需校准\n0xAA = CTRL_CMD_APPLY_GYRO_GAINS：恢复已保存的陀螺仪增益",
+            "roles": [
+              "host_command_value"
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "11": {
+        "name": "CAL1_L",
+        "access": "RW",
+        "width": 1,
+        "description": "CTRL9 参数传输寄存器 CAL1 低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "cal1_l",
+            "bits": "7:0",
+            "description": "CAL1 低字节",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "12": {
+        "name": "CAL1_H",
+        "access": "RW",
+        "width": 1,
+        "description": "CTRL9 参数传输寄存器 CAL1 高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "cal1_h",
+            "bits": "7:0",
+            "description": "CAL1 高字节",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "13": {
+        "name": "CAL2_L",
+        "access": "RW",
+        "width": 1,
+        "description": "CTRL9 参数传输寄存器 CAL2 低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "cal2_l",
+            "bits": "7:0",
+            "description": "CAL2 低字节",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "14": {
+        "name": "CAL2_H",
+        "access": "RW",
+        "width": 1,
+        "description": "CTRL9 参数传输寄存器 CAL2 高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "cal2_h",
+            "bits": "7:0",
+            "description": "CAL2 高字节",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "15": {
+        "name": "CAL3_L",
+        "access": "RW",
+        "width": 1,
+        "description": "CTRL9 参数传输寄存器 CAL3 低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "cal3_l",
+            "bits": "7:0",
+            "description": "CAL3 低字节",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "16": {
+        "name": "CAL3_H",
+        "access": "RW",
+        "width": 1,
+        "description": "CTRL9 参数传输寄存器 CAL3 高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "cal3_h",
+            "bits": "7:0",
+            "description": "CAL3 高字节",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "17": {
+        "name": "CAL4_L",
+        "access": "RW",
+        "width": 1,
+        "description": "CTRL9 参数传输寄存器 CAL4 低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "cal4_l",
+            "bits": "7:0",
+            "description": "CAL4 低字节",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "18": {
+        "name": "CAL4_H",
+        "access": "RW",
+        "width": 1,
+        "description": "CTRL9 参数传输寄存器 CAL4 高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "cal4_h",
+            "bits": "7:0",
+            "description": "CAL4 高字节",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "19": {
+        "name": "FIFO_WTM_TH",
+        "access": "RW",
+        "width": 1,
+        "description": "FIFO 水位线阈值寄存器，单位为 ODR 样本数",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "fifo_wtm",
+            "bits": "7:0",
+            "description": "触发 FIFO 水位线所需的 ODR 样本数量",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "20": {
+        "name": "FIFO_CTRL",
+        "access": "RW",
+        "width": 1,
+        "description": "FIFO 控制寄存器",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "fifo_rd_mode",
+            "bits": "7:7",
+            "description": "FIFO 读写模式\n0 = 写模式，使能的传感器数据可写入 FIFO\n1 = 读模式，可通过 FIFO_DATA 读取 FIFO 数据；该位由 CTRL_CMD_REQ_FIFO 置位，读完后必须清零",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved6_4",
+            "bits": "6:4",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "fifo_size",
+            "bits": "3:2",
+            "description": "FIFO 样本深度\n0 = 16 个样本\n1 = 32 个样本\n2 = 64 个样本\n3 = 128 个样本",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "fifo_mode",
+            "bits": "1:0",
+            "description": "FIFO 工作模式\n0 = 旁路模式（Bypass），FIFO 禁用\n1 = FIFO 模式\n2 = 流模式（Stream）\n3 = 保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "21": {
+        "name": "FIFO_SMPL_CNT",
+        "access": "RO",
+        "width": 1,
+        "description": "FIFO 样本计数低 8 位，单位为 word（2 字节）",
+        "roles": [
+          "fifo_status",
+          "fifo_count"
+        ],
+        "fields": [
+          {
+            "name": "fifo_smpl_cnt",
+            "bits": "7:0",
+            "description": "FIFO 样本计数 [7:0]",
+            "roles": [
+              "fifo_count_low"
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "22": {
+        "name": "FIFO_STATUS",
+        "access": "RO",
+        "width": 1,
+        "description": "FIFO 状态寄存器",
+        "roles": [
+          "fifo_status",
+          "fifo_count"
+        ],
+        "fields": [
+          {
+            "name": "fifo_full",
+            "bits": "7:7",
+            "description": "FIFO 满标志\n0 = FIFO 未满\n1 = FIFO 已满",
+            "roles": [
+              "fifo_full"
+            ],
+            "event": "fifo_full",
+            "ignore_by_default": false
+          },
+          {
+            "name": "fifo_wtm",
+            "bits": "6:6",
+            "description": "FIFO 水位线标志\n0 = 未达到 FIFO 水位线\n1 = 已达到 FIFO 水位线",
+            "roles": [
+              "fifo_watermark"
+            ],
+            "event": "fifo_watermark",
+            "ignore_by_default": false
+          },
+          {
+            "name": "fifo_ovflow",
+            "bits": "5:5",
+            "description": "FIFO 溢出标志\n0 = 未发生 FIFO 溢出\n1 = 已发生 FIFO 溢出（出现数据丢弃）",
+            "roles": [
+              "fifo_overflow"
+            ],
+            "event": "fifo_overflow",
+            "ignore_by_default": false
+          },
+          {
+            "name": "fifo_not_empty",
+            "bits": "4:4",
+            "description": "FIFO 非空标志\n0 = FIFO 为空\n1 = FIFO 非空",
+            "roles": [
+              "fifo_non_empty"
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved3_2",
+            "bits": "3:2",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "fifo_smpl_cnt",
+            "bits": "1:0",
+            "description": "FIFO 样本计数 [9:8]，与 FIFO_SMPL_CNT[7:0] 拼合",
+            "roles": [
+              "fifo_count_high"
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "23": {
+        "name": "FIFO_DATA",
+        "access": "RO",
+        "width": 1,
+        "description": "FIFO 数据输出寄存器",
+        "roles": [
+          "fifo_data"
+        ],
+        "fields": [
+          {
+            "name": "fifo_data",
+            "bits": "7:0",
+            "description": "8 位 FIFO 数据输出",
+            "roles": [
+              "fifo_data_byte"
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "45": {
+        "name": "STATUSINT",
+        "access": "RO",
+        "width": 1,
+        "description": "传感器数据可用、锁定状态和 CTRL9 命令完成状态寄存器",
+        "roles": [
+          "interrupt_status"
+        ],
+        "fields": [
+          {
+            "name": "ctrl9_cmd_done",
+            "bits": "7:7",
+            "description": "CTRL9 命令完成标志\n0 = 未完成\n1 = 已完成",
+            "roles": [
+              "interrupt_status_bit",
+              "ctrl9_done"
+            ],
+            "event": "ctrl9_done",
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved6_2",
+            "bits": "6:2",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "locked",
+            "bits": "1:1",
+            "description": "SyncSample 数据锁定状态；非 SyncSample 模式下显示 INT1 电平\n0 = 传感器数据未锁定\n1 = 传感器数据已锁定",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "avail",
+            "bits": "0:0",
+            "description": "SyncSample 数据可用状态；非 SyncSample 模式下显示 INT2 电平\n0 = 传感器数据不可用\n1 = 传感器数据可用",
+            "roles": [
+              "data_ready"
+            ],
+            "event": "data_ready",
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "46": {
+        "name": "STATUS0",
+        "access": "RO",
+        "width": 1,
+        "description": "输出数据状态寄存器",
+        "roles": [
+          "data_ready_status"
+        ],
+        "fields": [
+          {
+            "name": "reserved7_2",
+            "bits": "7:2",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "gda",
+            "bits": "1:1",
+            "description": "陀螺仪新数据可用\n0 = 上次读取后没有更新\n1 = 有新数据可读",
+            "roles": [
+              "gyro_drdy"
+            ],
+            "event": "gyro_drdy",
+            "ignore_by_default": false
+          },
+          {
+            "name": "ada",
+            "bits": "0:0",
+            "description": "加速度计新数据可用\n0 = 上次读取后没有更新\n1 = 有新数据可读",
+            "roles": [
+              "accel_drdy"
+            ],
+            "event": "accel_drdy",
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "47": {
+        "name": "STATUS1",
+        "access": "RO",
+        "width": 1,
+        "description": "活动检测状态寄存器",
+        "roles": [
+          "activity_status"
+        ],
+        "fields": [
+          {
+            "name": "significant_motion",
+            "bits": "7:7",
+            "description": "显著运动检测状态\n0 = 未检测到显著运动\n1 = 检测到显著运动",
+            "roles": [
+
+            ],
+            "event": "significant_motion",
+            "ignore_by_default": false
+          },
+          {
+            "name": "no_motion",
+            "bits": "6:6",
+            "description": "无运动检测状态\n0 = 未检测到无运动事件\n1 = 检测到无运动事件",
+            "roles": [
+
+            ],
+            "event": "no_motion",
+            "ignore_by_default": false
+          },
+          {
+            "name": "any_motion",
+            "bits": "5:5",
+            "description": "任意运动检测状态\n0 = 未检测到任意运动\n1 = 检测到任意运动",
+            "roles": [
+
+            ],
+            "event": "any_motion",
+            "ignore_by_default": false
+          },
+          {
+            "name": "pedometer",
+            "bits": "4:4",
+            "description": "计步器事件状态\n0 = 未检测到步数事件\n1 = 检测到步数事件",
+            "roles": [
+
+            ],
+            "event": "pedometer",
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved3",
+            "bits": "3:3",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "wom",
+            "bits": "2:2",
+            "description": "运动唤醒（Wake on Motion）检测状态\n0 = 未检测到 WoM 事件\n1 = 检测到 WoM 事件",
+            "roles": [
+
+            ],
+            "event": "wake_on_motion",
+            "ignore_by_default": false
+          },
+          {
+            "name": "tap",
+            "bits": "1:1",
+            "description": "Tap 检测状态\n0 = 未检测到 Tap\n1 = 检测到 Tap",
+            "roles": [
+
+            ],
+            "event": "tap",
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved0",
+            "bits": "0:0",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "48": {
+        "name": "TIMESTAMP_LOW",
+        "access": "RO",
+        "width": 1,
+        "description": "采样时间戳低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "timestamp",
+            "bits": "7:0",
+            "description": "采样时间戳 [7:0]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "49": {
+        "name": "TIMESTAMP_MID",
+        "access": "RO",
+        "width": 1,
+        "description": "采样时间戳中字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "timestamp",
+            "bits": "7:0",
+            "description": "采样时间戳 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "50": {
+        "name": "TIMESTAMP_HIGH",
+        "access": "RO",
+        "width": 1,
+        "description": "采样时间戳高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "timestamp",
+            "bits": "7:0",
+            "description": "采样时间戳 [23:16]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "51": {
+        "name": "TEMP_L",
+        "access": "RO",
+        "width": 1,
+        "description": "温度输出低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "temp",
+            "bits": "7:0",
+            "description": "温度输出 [7:0]，T = TEMP_H + TEMP_L / 256",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "52": {
+        "name": "TEMP_H",
+        "access": "RO",
+        "width": 1,
+        "description": "温度输出高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "temp",
+            "bits": "7:0",
+            "description": "温度输出 [15:8]，二进制补码",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "53": {
+        "name": "AX_L",
+        "access": "RO",
+        "width": 1,
+        "description": "X 轴加速度输出低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "ax",
+            "bits": "7:0",
+            "description": "X 轴加速度 [7:0]，二进制补码",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "54": {
+        "name": "AX_H",
+        "access": "RO",
+        "width": 1,
+        "description": "X 轴加速度输出高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "ax",
+            "bits": "7:0",
+            "description": "X 轴加速度 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "55": {
+        "name": "AY_L",
+        "access": "RO",
+        "width": 1,
+        "description": "Y 轴加速度输出低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "ay",
+            "bits": "7:0",
+            "description": "Y 轴加速度 [7:0]，二进制补码",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "56": {
+        "name": "AY_H",
+        "access": "RO",
+        "width": 1,
+        "description": "Y 轴加速度输出高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "ay",
+            "bits": "7:0",
+            "description": "Y 轴加速度 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "57": {
+        "name": "AZ_L",
+        "access": "RO",
+        "width": 1,
+        "description": "Z 轴加速度输出低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "az",
+            "bits": "7:0",
+            "description": "Z 轴加速度 [7:0]，二进制补码",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "58": {
+        "name": "AZ_H",
+        "access": "RO",
+        "width": 1,
+        "description": "Z 轴加速度输出高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "az",
+            "bits": "7:0",
+            "description": "Z 轴加速度 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "59": {
+        "name": "GX_L",
+        "access": "RO",
+        "width": 1,
+        "description": "X 轴角速度输出低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "gx",
+            "bits": "7:0",
+            "description": "X 轴角速度 [7:0]，二进制补码",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "60": {
+        "name": "GX_H",
+        "access": "RO",
+        "width": 1,
+        "description": "X 轴角速度输出高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "gx",
+            "bits": "7:0",
+            "description": "X 轴角速度 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "61": {
+        "name": "GY_L",
+        "access": "RO",
+        "width": 1,
+        "description": "Y 轴角速度输出低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "gy",
+            "bits": "7:0",
+            "description": "Y 轴角速度 [7:0]，二进制补码",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "62": {
+        "name": "GY_H",
+        "access": "RO",
+        "width": 1,
+        "description": "Y 轴角速度输出高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "gy",
+            "bits": "7:0",
+            "description": "Y 轴角速度 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "63": {
+        "name": "GZ_L",
+        "access": "RO",
+        "width": 1,
+        "description": "Z 轴角速度输出低字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "gz",
+            "bits": "7:0",
+            "description": "Z 轴角速度 [7:0]，二进制补码",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "64": {
+        "name": "GZ_H",
+        "access": "RO",
+        "width": 1,
+        "description": "Z 轴角速度输出高字节",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "gz",
+            "bits": "7:0",
+            "description": "Z 轴角速度 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "70": {
+        "name": "COD_STATUS",
+        "access": "RO",
+        "width": 1,
+        "description": "按需校准（Calibration-On-Demand, COD）状态寄存器，仅在 COD 命令后有效",
+        "roles": [
+          "calibration_status"
+        ],
+        "fields": [
+          {
+            "name": "x_limit_l_fail",
+            "bits": "7:7",
+            "description": "X 轴陀螺仪低灵敏度限值检查\n0 = COD 低灵敏度限值检查通过\n1 = COD 低灵敏度限值检查失败",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "x_limit_h_fail",
+            "bits": "6:6",
+            "description": "X 轴陀螺仪高灵敏度限值检查\n0 = COD 高灵敏度限值检查通过\n1 = COD 高灵敏度限值检查失败",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "y_limit_l_fail",
+            "bits": "5:5",
+            "description": "Y 轴陀螺仪低灵敏度限值检查\n0 = COD 低灵敏度限值检查通过\n1 = COD 低灵敏度限值检查失败",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "y_limit_h_fail",
+            "bits": "4:4",
+            "description": "Y 轴陀螺仪高灵敏度限值检查\n0 = COD 高灵敏度限值检查通过\n1 = COD 高灵敏度限值检查失败",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "accel_check",
+            "bits": "3:3",
+            "description": "COD 期间加速度计振动检查\n0 = 加速度计检查通过\n1 = 加速度计检查失败",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "startup_failed",
+            "bits": "2:2",
+            "description": "陀螺仪启动状态\n0 = 陀螺仪启动成功\n1 = 调用 COD 时发生陀螺仪启动失败",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "gyro_enabled",
+            "bits": "1:1",
+            "description": "COD 调用时陀螺仪使能状态\n0 = 调用 COD 时陀螺仪未使能\n1 = 调用 COD 时陀螺仪已使能，COD 返回失败",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "cod_failed",
+            "bits": "0:0",
+            "description": "COD 结果\n0 = COD 成功，新增益参数将应用到 GX/GY 数据\n1 = COD 失败，不应用 COD 校正",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "73": {
+        "name": "DQW_L",
+        "access": "RO",
+        "width": 1,
+        "description": "通用目的寄存器；CTRL_CMD_COPY_USID 后保存 FW_Version 字节 0",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "dqw",
+            "bits": "7:0",
+            "description": "通用目的数据 [7:0]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "74": {
+        "name": "DQW_H",
+        "access": "RO",
+        "width": 1,
+        "description": "通用目的寄存器；CTRL_CMD_COPY_USID 后保存 FW_Version 字节 1",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "dqw",
+            "bits": "7:0",
+            "description": "通用目的数据 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "75": {
+        "name": "DQX_L",
+        "access": "RO",
+        "width": 1,
+        "description": "通用目的寄存器；CTRL_CMD_COPY_USID 后保存 FW_Version 字节 2",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "dqx",
+            "bits": "7:0",
+            "description": "通用目的数据 [7:0]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "76": {
+        "name": "DQX_H",
+        "access": "RO",
+        "width": 1,
+        "description": "保留寄存器",
+        "roles": [
+
+        ],
+        "fields": [
+
+        ]
+      },
+      "77": {
+        "name": "DQY_L",
+        "access": "RO",
+        "width": 1,
+        "description": "通用目的寄存器；成功复位后手册说明寄存器 0x4D 等于 0x80",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "dqy",
+            "bits": "7:0",
+            "description": "通用目的数据 [7:0]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "78": {
+        "name": "DQY_H",
+        "access": "RO",
+        "width": 1,
+        "description": "保留寄存器",
+        "roles": [
+
+        ],
+        "fields": [
+
+        ]
+      },
+      "79": {
+        "name": "DQZ_L",
+        "access": "RO",
+        "width": 1,
+        "description": "保留寄存器",
+        "roles": [
+
+        ],
+        "fields": [
+
+        ]
+      },
+      "80": {
+        "name": "DQZ_H",
+        "access": "RO",
+        "width": 1,
+        "description": "保留寄存器",
+        "roles": [
+
+        ],
+        "fields": [
+
+        ]
+      },
+      "81": {
+        "name": "DVX_L",
+        "access": "RO",
+        "width": 1,
+        "description": "通用目的寄存器；CTRL_CMD_COPY_USID 后保存 USID 字节 0",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "dvx",
+            "bits": "7:0",
+            "description": "通用目的数据 [7:0]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "82": {
+        "name": "DVX_H",
+        "access": "RO",
+        "width": 1,
+        "description": "通用目的寄存器；CTRL_CMD_COPY_USID 后保存 USID 字节 1",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "dvx",
+            "bits": "7:0",
+            "description": "通用目的数据 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "83": {
+        "name": "DVY_L",
+        "access": "RO",
+        "width": 1,
+        "description": "通用目的寄存器；CTRL_CMD_COPY_USID 后保存 USID 字节 2",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "dvy",
+            "bits": "7:0",
+            "description": "通用目的数据 [7:0]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "84": {
+        "name": "DVY_H",
+        "access": "RO",
+        "width": 1,
+        "description": "通用目的寄存器；CTRL_CMD_COPY_USID 后保存 USID 字节 3",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "dvy",
+            "bits": "7:0",
+            "description": "通用目的数据 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "85": {
+        "name": "DVZ_L",
+        "access": "RO",
+        "width": 1,
+        "description": "通用目的寄存器；CTRL_CMD_COPY_USID 后保存 USID 字节 4",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "dvz",
+            "bits": "7:0",
+            "description": "通用目的数据 [7:0]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "86": {
+        "name": "DVZ_H",
+        "access": "RO",
+        "width": 1,
+        "description": "通用目的寄存器；CTRL_CMD_COPY_USID 后保存 USID 字节 5",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "dvz",
+            "bits": "7:0",
+            "description": "通用目的数据 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "89": {
+        "name": "TAP_STATUS",
+        "access": "RO",
+        "width": 1,
+        "description": "Tap 检测输出状态寄存器",
+        "roles": [
+          "tap_status"
+        ],
+        "fields": [
+          {
+            "name": "tap_polarity",
+            "bits": "7:7",
+            "description": "Tap 方向极性\n0 = 在 Tap 轴正方向检测到 Tap\n1 = 在 Tap 轴负方向检测到 Tap",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved6",
+            "bits": "6:6",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "tap_axis",
+            "bits": "5:4",
+            "description": "Tap 检测轴\n0 = 未检测到 Tap\n1 = 在 X 轴检测到 Tap\n2 = 在 Y 轴检测到 Tap\n3 = 在 Z 轴检测到 Tap",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "reserved3_2",
+            "bits": "3:2",
+            "description": "保留",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          },
+          {
+            "name": "tap_num",
+            "bits": "1:0",
+            "description": "Tap 次数\n0 = 未检测到 Tap\n1 = 检测到单击 Tap\n2 = 检测到双击 Tap\n3 = 不适用",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "90": {
+        "name": "STEP_CNT_LOW",
+        "access": "RO",
+        "width": 1,
+        "description": "计步器步数低字节",
+        "roles": [
+          "step_count"
+        ],
+        "fields": [
+          {
+            "name": "step_count",
+            "bits": "7:0",
+            "description": "步数 [7:0]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "91": {
+        "name": "STEP_CNT_MIDL",
+        "access": "RO",
+        "width": 1,
+        "description": "计步器步数中字节",
+        "roles": [
+          "step_count"
+        ],
+        "fields": [
+          {
+            "name": "step_count",
+            "bits": "7:0",
+            "description": "步数 [15:8]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "92": {
+        "name": "STEP_CNT_HIGH",
+        "access": "RO",
+        "width": 1,
+        "description": "计步器步数高字节",
+        "roles": [
+          "step_count"
+        ],
+        "fields": [
+          {
+            "name": "step_count",
+            "bits": "7:0",
+            "description": "步数 [23:16]",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      },
+      "96": {
+        "name": "RESET",
+        "access": "WO",
+        "width": 1,
+        "description": "软复位寄存器；任意模式下写入 0xB0 会立即触发传感器复位流程",
+        "roles": [
+
+        ],
+        "fields": [
+          {
+            "name": "reset",
+            "bits": "7:0",
+            "description": "软复位密钥\n0xB0 = 触发软复位；复位成功后寄存器 0x4D 等于 0x80",
+            "roles": [
+
+            ],
+            "event": null,
+            "ignore_by_default": false
+          }
+        ]
+      }
+    }
+  }
+}

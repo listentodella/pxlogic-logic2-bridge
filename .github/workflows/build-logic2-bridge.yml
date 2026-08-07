@@ -46,6 +46,30 @@ permissions:
   contents: read
 
 jobs:
+  sensor-extensions:
+    name: QST sensor HLAs
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Test I2C and SPI register decoding
+        run: |
+          for extension in qmi8660 qmi8658 qma6100p; do
+            python3 -m unittest discover \
+              -s "tools/logic2-bridge/extensions/$extension" \
+              -p 'test_*.py' -v
+          done
+          python3 -m py_compile \
+            tools/logic2-bridge/extensions/qmi8660/HighLevelAnalyzer.py \
+            tools/logic2-bridge/extensions/qmi8660/qmi8660_decode.py \
+            tools/logic2-bridge/extensions/qmi8658/HighLevelAnalyzer.py \
+            tools/logic2-bridge/extensions/qmi8658/qmi8658_decode.py \
+            tools/logic2-bridge/extensions/qmi8658/qst_hla_common.py \
+            tools/logic2-bridge/extensions/qma6100p/HighLevelAnalyzer.py \
+            tools/logic2-bridge/extensions/qma6100p/qma6100p_decode.py \
+            tools/logic2-bridge/extensions/qma6100p/qst_hla_common.py
+
   portable-layer:
     name: Portable layer (${{ matrix.os_name }})
     if: >-
@@ -403,6 +427,20 @@ jobs:
           file "$resources/tools/logic2-bridge/build/graph-host" \
             | grep -q "arm64"
           test -f "$resources/tools/logic2-bridge/compatibility/profiles.json"
+          test -f "$resources/tools/logic2-bridge/extensions/qmi8660/extension.json"
+          test -f "$resources/tools/logic2-bridge/extensions/qmi8660/HighLevelAnalyzer.py"
+          test -f "$resources/tools/logic2-bridge/extensions/qmi8660/qmi8660_decode.py"
+          test -f "$resources/tools/logic2-bridge/extensions/qmi8660/qmi8660_registers.json"
+          test -f "$resources/tools/logic2-bridge/extensions/qmi8658/extension.json"
+          test -f "$resources/tools/logic2-bridge/extensions/qmi8658/HighLevelAnalyzer.py"
+          test -f "$resources/tools/logic2-bridge/extensions/qmi8658/qmi8658_decode.py"
+          test -f "$resources/tools/logic2-bridge/extensions/qmi8658/qmi8658_registers.json"
+          test -f "$resources/tools/logic2-bridge/extensions/qmi8658/qst_hla_common.py"
+          test -f "$resources/tools/logic2-bridge/extensions/qma6100p/extension.json"
+          test -f "$resources/tools/logic2-bridge/extensions/qma6100p/HighLevelAnalyzer.py"
+          test -f "$resources/tools/logic2-bridge/extensions/qma6100p/qma6100p_decode.py"
+          test -f "$resources/tools/logic2-bridge/extensions/qma6100p/qma6100p_registers.json"
+          test -f "$resources/tools/logic2-bridge/extensions/qma6100p/qst_hla_common.py"
           file "$resources/target/release/usb_smoke" \
             | grep -q "arm64"
           test -f "$resources/resources/bitstreams/hspi_ddr.bin"
@@ -624,6 +662,9 @@ jobs:
             $stage, `
             (Join-Path $bridge 'lib'), `
             (Join-Path $bridge 'compatibility'), `
+            (Join-Path $bridge 'extensions/qmi8660'), `
+            (Join-Path $bridge 'extensions/qmi8658'), `
+            (Join-Path $bridge 'extensions/qma6100p'), `
             (Join-Path $bridge 'build'), `
             (Join-Path $stage 'target/release'), `
             (Join-Path $stage 'resources/bitstreams'), `
@@ -635,6 +676,34 @@ jobs:
           Copy-Item 'tools/logic2-bridge/lib/*' (Join-Path $bridge 'lib') -Recurse
           Copy-Item 'tools/logic2-bridge/compatibility/*' `
             (Join-Path $bridge 'compatibility') -Recurse
+          Copy-Item 'tools/logic2-bridge/extensions/qmi8660/extension.json' `
+            (Join-Path $bridge 'extensions/qmi8660/extension.json')
+          Copy-Item 'tools/logic2-bridge/extensions/qmi8660/HighLevelAnalyzer.py' `
+            (Join-Path $bridge 'extensions/qmi8660/HighLevelAnalyzer.py')
+          Copy-Item 'tools/logic2-bridge/extensions/qmi8660/qmi8660_decode.py' `
+            (Join-Path $bridge 'extensions/qmi8660/qmi8660_decode.py')
+          Copy-Item 'tools/logic2-bridge/extensions/qmi8660/qmi8660_registers.json' `
+            (Join-Path $bridge 'extensions/qmi8660/qmi8660_registers.json')
+          Copy-Item 'tools/logic2-bridge/extensions/qmi8658/extension.json' `
+            (Join-Path $bridge 'extensions/qmi8658/extension.json')
+          Copy-Item 'tools/logic2-bridge/extensions/qmi8658/HighLevelAnalyzer.py' `
+            (Join-Path $bridge 'extensions/qmi8658/HighLevelAnalyzer.py')
+          Copy-Item 'tools/logic2-bridge/extensions/qmi8658/qmi8658_decode.py' `
+            (Join-Path $bridge 'extensions/qmi8658/qmi8658_decode.py')
+          Copy-Item 'tools/logic2-bridge/extensions/qmi8658/qmi8658_registers.json' `
+            (Join-Path $bridge 'extensions/qmi8658/qmi8658_registers.json')
+          Copy-Item 'tools/logic2-bridge/extensions/qmi8658/qst_hla_common.py' `
+            (Join-Path $bridge 'extensions/qmi8658/qst_hla_common.py')
+          Copy-Item 'tools/logic2-bridge/extensions/qma6100p/extension.json' `
+            (Join-Path $bridge 'extensions/qma6100p/extension.json')
+          Copy-Item 'tools/logic2-bridge/extensions/qma6100p/HighLevelAnalyzer.py' `
+            (Join-Path $bridge 'extensions/qma6100p/HighLevelAnalyzer.py')
+          Copy-Item 'tools/logic2-bridge/extensions/qma6100p/qma6100p_decode.py' `
+            (Join-Path $bridge 'extensions/qma6100p/qma6100p_decode.py')
+          Copy-Item 'tools/logic2-bridge/extensions/qma6100p/qma6100p_registers.json' `
+            (Join-Path $bridge 'extensions/qma6100p/qma6100p_registers.json')
+          Copy-Item 'tools/logic2-bridge/extensions/qma6100p/qst_hla_common.py' `
+            (Join-Path $bridge 'extensions/qma6100p/qst_hla_common.py')
           Copy-Item 'tools/logic2-bridge/build/payload/graph-host.exe' `
             (Join-Path $bridge 'build/graph-host.exe')
           Copy-Item 'tools/logic2-bridge/build/payload/usb_smoke.exe' `
@@ -652,6 +721,20 @@ jobs:
             (Join-Path $stage 'PXLogic Bridge.exe'),
             (Join-Path $bridge 'index.cjs'),
             (Join-Path $bridge 'build/graph-host.exe'),
+            (Join-Path $bridge 'extensions/qmi8660/extension.json'),
+            (Join-Path $bridge 'extensions/qmi8660/HighLevelAnalyzer.py'),
+            (Join-Path $bridge 'extensions/qmi8660/qmi8660_decode.py'),
+            (Join-Path $bridge 'extensions/qmi8660/qmi8660_registers.json'),
+            (Join-Path $bridge 'extensions/qmi8658/extension.json'),
+            (Join-Path $bridge 'extensions/qmi8658/HighLevelAnalyzer.py'),
+            (Join-Path $bridge 'extensions/qmi8658/qmi8658_decode.py'),
+            (Join-Path $bridge 'extensions/qmi8658/qmi8658_registers.json'),
+            (Join-Path $bridge 'extensions/qmi8658/qst_hla_common.py'),
+            (Join-Path $bridge 'extensions/qma6100p/extension.json'),
+            (Join-Path $bridge 'extensions/qma6100p/HighLevelAnalyzer.py'),
+            (Join-Path $bridge 'extensions/qma6100p/qma6100p_decode.py'),
+            (Join-Path $bridge 'extensions/qma6100p/qma6100p_registers.json'),
+            (Join-Path $bridge 'extensions/qma6100p/qst_hla_common.py'),
             (Join-Path $stage 'target/release/usb_smoke.exe'),
             (Join-Path $stage 'resources/bitstreams/hspi_ddr.bin'),
             (Join-Path $stage 'resources/firmware/SCI_LOGIC.bin')

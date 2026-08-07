@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "linux")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::{HashSet, VecDeque},
     fs,
@@ -15,8 +17,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-#[cfg(target_os = "linux")]
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -26,6 +26,48 @@ use tauri_plugin_dialog::DialogExt;
 
 const MAX_LOG_LINES: usize = 500;
 const NODE_PROBE_MARKER: &str = "PXLOGIC_NODE_OK:";
+const PXVIEW_THRESHOLD_VOLTAGES: [f64; 4] = [1.8, 2.5, 3.3, 5.0];
+
+struct DecoderExtension {
+    directory: &'static str,
+    label: &'static str,
+    files: &'static [&'static str],
+}
+
+const DECODER_EXTENSIONS: &[DecoderExtension] = &[
+    DecoderExtension {
+        directory: "qmi8660",
+        label: "QMI8660",
+        files: &[
+            "extension.json",
+            "HighLevelAnalyzer.py",
+            "qmi8660_decode.py",
+            "qmi8660_registers.json",
+        ],
+    },
+    DecoderExtension {
+        directory: "qmi8658",
+        label: "QMI8658A",
+        files: &[
+            "extension.json",
+            "HighLevelAnalyzer.py",
+            "qmi8658_decode.py",
+            "qmi8658_registers.json",
+            "qst_hla_common.py",
+        ],
+    },
+    DecoderExtension {
+        directory: "qma6100p",
+        label: "QMA6100P",
+        files: &[
+            "extension.json",
+            "HighLevelAnalyzer.py",
+            "qma6100p_decode.py",
+            "qma6100p_registers.json",
+            "qst_hla_common.py",
+        ],
+    },
+];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,10 +78,18 @@ struct ClientSettings {
     screen_quadrant: u8,
     #[serde(default = "default_maximize_logic_window")]
     maximize_logic_window: bool,
+    #[serde(default)]
+    pxlogic_device_id: String,
+    #[serde(default = "default_pxlogic_threshold_volts")]
+    pxlogic_threshold_volts: f64,
 }
 
 fn default_maximize_logic_window() -> bool {
     true
+}
+
+fn default_pxlogic_threshold_volts() -> f64 {
+    PXVIEW_THRESHOLD_VOLTAGES[0]
 }
 
 impl Default for ClientSettings {
@@ -50,6 +100,8 @@ impl Default for ClientSettings {
             preferred_port: 12472,
             screen_quadrant: 3,
             maximize_logic_window: true,
+            pxlogic_device_id: String::new(),
+            pxlogic_threshold_volts: default_pxlogic_threshold_volts(),
         }
     }
 }
@@ -62,6 +114,10 @@ impl ClientSettings {
         }
         if self.screen_quadrant < 1 || self.screen_quadrant > 4 {
             self.screen_quadrant = 3;
+        }
+        self.pxlogic_device_id = self.pxlogic_device_id.trim().to_string();
+        if !PXVIEW_THRESHOLD_VOLTAGES.contains(&self.pxlogic_threshold_volts) {
+            self.pxlogic_threshold_volts = default_pxlogic_threshold_volts();
         }
         self
     }
@@ -176,8 +232,50 @@ impl Default for BridgeState {
 struct InitialState {
     settings: ClientSettings,
     applications: Vec<LogicInspection>,
+    hardware: PxlogicHardwareState,
     bridge_state: BridgeState,
     logs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+struct PxlogicDeviceInfo {
+    id: String,
+    vid: u16,
+    pid: u16,
+    bus: Option<u8>,
+    address: Option<u8>,
+    label: String,
+    ready: bool,
+    manufacturer: Option<String>,
+    product: Option<String>,
+    serial_number: Option<String>,
+    usb_speed: Option<String>,
+    logic_mode: Option<u32>,
+    profile_model: Option<String>,
+    probe_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PxlogicHardwareState {
+    devices: Vec<PxlogicDeviceInfo>,
+    selected_device_id: Option<String>,
+    firmware_resource_ready: bool,
+    bitstream_resources_ready: bool,
+    error: Option<String>,
+}
+
+impl PxlogicHardwareState {
+    fn failure(error: impl Into<String>) -> Self {
+        Self {
+            devices: Vec::new(),
+            selected_device_id: None,
+            firmware_resource_ready: false,
+            bitstream_resources_ready: false,
+            error: Some(error.into()),
+        }
+    }
 }
 
 struct ManagedChild {
@@ -264,6 +362,194 @@ fn store_settings(app: &AppHandle, settings: ClientSettings) -> Result<ClientSet
 }
 
 #[cfg(target_os = "macos")]
+fn logic_config_path() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or_else(|| "无法确定用户目录".to_string())?;
+    Ok(PathBuf::from(home).join("Library/Application Support/Logic/config.json"))
+}
+
+#[cfg(target_os = "windows")]
+fn logic_config_path() -> Result<PathBuf, String> {
+    let app_data =
+        std::env::var_os("APPDATA").ok_or_else(|| "无法确定 APPDATA 目录".to_string())?;
+    Ok(PathBuf::from(app_data).join("Logic/config.json"))
+}
+
+#[cfg(target_os = "linux")]
+fn logic_config_path() -> Result<PathBuf, String> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .ok_or_else(|| "无法确定 Linux 配置目录".to_string())?;
+    Ok(config.join("Logic/config.json"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn logic_config_path() -> Result<PathBuf, String> {
+    Err("当前平台不支持自动安装 Logic 2 扩展".to_string())
+}
+
+fn normalized_extension_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    if cfg!(target_os = "windows") {
+        normalized.to_lowercase()
+    } else {
+        normalized
+    }
+}
+
+fn update_decoder_extension_config(
+    config: &mut serde_json::Value,
+    directory: &str,
+    manifest_path: &Path,
+) -> Result<bool, String> {
+    let root = config
+        .as_object_mut()
+        .ok_or_else(|| "Logic config.json 顶层不是 JSON 对象".to_string())?;
+    let installed = root
+        .entry("installedExtensions")
+        .or_insert_with(|| serde_json::json!({ "version": 2, "extensions": [] }));
+    let installed = installed
+        .as_object_mut()
+        .ok_or_else(|| "Logic installedExtensions 配置无效".to_string())?;
+    let mut changed = installed.get("version").and_then(serde_json::Value::as_u64) != Some(2);
+    installed.insert("version".to_string(), serde_json::json!(2));
+    let extensions = installed
+        .entry("extensions")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or_else(|| "Logic installedExtensions.extensions 配置无效".to_string())?;
+
+    let desired = manifest_path.to_string_lossy().into_owned();
+    let desired_normalized = normalized_extension_path(&desired);
+    let extension_suffix = format!("/extensions/{directory}/extension.json");
+    let mut next = Vec::with_capacity(extensions.len() + 1);
+    let mut found = false;
+    for extension in extensions.iter() {
+        let stored_path = extension
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let stored_normalized = normalized_extension_path(stored_path);
+        let belongs_to_bridge = stored_normalized.ends_with(&extension_suffix);
+        if !belongs_to_bridge {
+            next.push(extension.clone());
+            continue;
+        }
+        if found {
+            changed = true;
+            continue;
+        }
+        found = true;
+        let mut replacement = extension.clone();
+        let object = replacement
+            .as_object_mut()
+            .ok_or_else(|| format!("{directory} 扩展配置项不是 JSON 对象"))?;
+        if stored_normalized != desired_normalized {
+            object.insert("path".to_string(), serde_json::json!(desired.clone()));
+            changed = true;
+        }
+        if object.get("type").and_then(serde_json::Value::as_str) != Some("Local") {
+            object.insert("type".to_string(), serde_json::json!("Local"));
+            changed = true;
+        }
+        if object.get("isFromWeb").and_then(serde_json::Value::as_bool) != Some(false) {
+            object.insert("isFromWeb".to_string(), serde_json::json!(false));
+            changed = true;
+        }
+        if !object.contains_key("isDisabled") {
+            object.insert("isDisabled".to_string(), serde_json::json!(false));
+            changed = true;
+        }
+        next.push(replacement);
+    }
+    if !found {
+        next.push(serde_json::json!({
+            "path": desired.clone(),
+            "isFromWeb": false,
+            "isDisabled": false,
+            "type": "Local"
+        }));
+        changed = true;
+    }
+    if changed {
+        *extensions = next;
+    }
+    Ok(changed)
+}
+
+fn install_decoder_extensions(app: &AppHandle) -> Result<String, String> {
+    let source_root = bridge_root(app)?.join("extensions");
+    let destination_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法确定扩展安装目录: {error}"))?
+        .join("extensions");
+    let mut manifest_paths = Vec::with_capacity(DECODER_EXTENSIONS.len());
+    for extension in DECODER_EXTENSIONS {
+        let source = source_root.join(extension.directory);
+        let destination = destination_root.join(extension.directory);
+        fs::create_dir_all(&destination)
+            .map_err(|error| format!("无法创建 {} 扩展目录: {error}", extension.label))?;
+        for name in extension.files {
+            let source_file = source.join(name);
+            if !source_file.is_file() {
+                return Err(format!(
+                    "{} 扩展资源不存在: {}",
+                    extension.label,
+                    source_file.display()
+                ));
+            }
+            fs::copy(&source_file, destination.join(name)).map_err(|error| {
+                format!("无法安装 {} 扩展文件 {name}: {error}", extension.label)
+            })?;
+        }
+        manifest_paths.push((extension.directory, destination.join("extension.json")));
+    }
+    let config_path = logic_config_path()?;
+    let mut config = if config_path.is_file() {
+        let contents = fs::read_to_string(&config_path)
+            .map_err(|error| format!("无法读取 {}: {error}", config_path.display()))?;
+        serde_json::from_str(&contents)
+            .map_err(|error| format!("Logic 配置 JSON 无效 {}: {error}", config_path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    let mut changed = false;
+    for (directory, manifest_path) in &manifest_paths {
+        changed |= update_decoder_extension_config(&mut config, directory, manifest_path)?;
+    }
+    if !changed {
+        return Ok("QMI8660、QMI8658A、QMA6100P 解码扩展已安装".to_string());
+    }
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| format!("Logic 配置路径无父目录: {}", config_path.display()))?;
+    fs::create_dir_all(parent).map_err(|error| format!("无法创建 Logic 配置目录: {error}"))?;
+    if config_path.is_file() {
+        let backup = config_path.with_extension("json.pxlogic-backup");
+        if !backup.exists() {
+            fs::copy(&config_path, &backup)
+                .map_err(|error| format!("无法备份 Logic 配置: {error}"))?;
+        }
+    }
+    let contents = serde_json::to_string_pretty(&config)
+        .map_err(|error| format!("无法序列化 Logic 配置: {error}"))?;
+    let temporary = config_path.with_extension("json.pxlogic.tmp");
+    fs::write(&temporary, format!("{contents}\n"))
+        .map_err(|error| format!("无法写入 Logic 临时配置: {error}"))?;
+    #[cfg(target_os = "windows")]
+    {
+        fs::copy(&temporary, &config_path)
+            .map_err(|error| format!("无法更新 Logic 配置: {error}"))?;
+        let _ = fs::remove_file(&temporary);
+    }
+    #[cfg(not(target_os = "windows"))]
+    fs::rename(&temporary, &config_path)
+        .map_err(|error| format!("无法更新 Logic 配置: {error}"))?;
+    Ok("已安装 QMI8660、QMI8658A、QMA6100P I2C/SPI 解码扩展".to_string())
+}
+
+#[cfg(target_os = "macos")]
 fn logic_executable(app_path: &Path) -> PathBuf {
     app_path.join("Contents/MacOS/Logic")
 }
@@ -281,9 +567,7 @@ fn is_appimage(path: &Path) -> bool {
 fn appimage_cache_root() -> Result<PathBuf, String> {
     let root = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
-        })
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
         .ok_or_else(|| "无法确定 Linux 缓存目录".to_string())?;
     Ok(root.join("pxlogic/logic2-bridge/appimages"))
 }
@@ -303,7 +587,12 @@ fn resolve_logic_installation(app_path: &Path) -> Result<PathBuf, String> {
         .unwrap_or(0);
     let key = format!(
         "{:x}",
-        Sha256::digest(format!("{}:{}:{}", app_path.display(), metadata.len(), modified))
+        Sha256::digest(format!(
+            "{}:{}:{}",
+            app_path.display(),
+            metadata.len(),
+            modified
+        ))
     );
     let cache_root = appimage_cache_root()?;
     let cached = cache_root.join(format!("{key}-{}-{modified}", metadata.len()));
@@ -345,8 +634,7 @@ fn resolve_logic_installation(app_path: &Path) -> Result<PathBuf, String> {
             .map_err(|error| format!("无法清理重复 AppImage 提取结果: {error}"))?;
         return Ok(app_dir);
     }
-    fs::rename(&temporary, &cached)
-        .map_err(|error| format!("无法保存 AppImage 缓存: {error}"))?;
+    fs::rename(&temporary, &cached).map_err(|error| format!("无法保存 AppImage 缓存: {error}"))?;
     Ok(app_dir)
 }
 
@@ -424,9 +712,7 @@ fn compatibility_architecture() -> &'static str {
 
 fn profile_runnable(status: &str, platform: &str, architecture: &str) -> bool {
     status == "verified"
-        || (status == "pending-live-validation"
-            && platform == "win32"
-            && architecture == "x64")
+        || (status == "pending-live-validation" && platform == "win32" && architecture == "x64")
 }
 
 fn installation_roots(installation_path: &Path) -> Vec<PathBuf> {
@@ -1215,6 +1501,20 @@ fn validate_bridge_payload(app: &AppHandle) -> Result<BridgePayload, String> {
         root.join("lib/logic-format.cjs"),
         root.join("lib/websocket-proxy.cjs"),
         root.join("compatibility/profiles.json"),
+        root.join("extensions/qmi8660/extension.json"),
+        root.join("extensions/qmi8660/HighLevelAnalyzer.py"),
+        root.join("extensions/qmi8660/qmi8660_decode.py"),
+        root.join("extensions/qmi8660/qmi8660_registers.json"),
+        root.join("extensions/qmi8658/extension.json"),
+        root.join("extensions/qmi8658/HighLevelAnalyzer.py"),
+        root.join("extensions/qmi8658/qmi8658_decode.py"),
+        root.join("extensions/qmi8658/qmi8658_registers.json"),
+        root.join("extensions/qmi8658/qst_hla_common.py"),
+        root.join("extensions/qma6100p/extension.json"),
+        root.join("extensions/qma6100p/HighLevelAnalyzer.py"),
+        root.join("extensions/qma6100p/qma6100p_decode.py"),
+        root.join("extensions/qma6100p/qma6100p_registers.json"),
+        root.join("extensions/qma6100p/qst_hla_common.py"),
         native_host,
         helper.clone(),
         bitstreams.join("hspi_ddr.bin"),
@@ -1235,6 +1535,57 @@ fn validate_bridge_payload(app: &AppHandle) -> Result<BridgePayload, String> {
         bitstreams,
         firmware,
     })
+}
+
+fn scan_pxlogic_hardware(app: &AppHandle, preferred_device_id: &str) -> PxlogicHardwareState {
+    let payload = match validate_bridge_payload(app) {
+        Ok(payload) => payload,
+        Err(error) => return PxlogicHardwareState::failure(error),
+    };
+    let mut command = Command::new(&payload.helper);
+    command
+        .arg("--list-json")
+        .current_dir(payload.helper.parent().unwrap_or_else(|| Path::new(".")))
+        .env("PXLOGIC_BITSTREAM_DIR", &payload.bitstreams)
+        .env("PXLOGIC_MCU_FIRMWARE", &payload.firmware)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_child_process(&mut command);
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(error) => {
+            return PxlogicHardwareState::failure(format!("无法启动 PXLogic 设备扫描: {error}"))
+        }
+    };
+    if !output.status.success() {
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        return PxlogicHardwareState::failure(format!(
+            "PXLogic 设备扫描失败（{}）: {}",
+            output.status,
+            diagnostic.trim()
+        ));
+    }
+    let devices = match serde_json::from_slice::<Vec<PxlogicDeviceInfo>>(&output.stdout) {
+        Ok(devices) => devices,
+        Err(error) => {
+            return PxlogicHardwareState::failure(format!("PXLogic 设备扫描响应无效: {error}"))
+        }
+    };
+    let selected_device_id = devices
+        .iter()
+        .find(|device| device.id == preferred_device_id)
+        .or_else(|| devices.iter().find(|device| device.ready))
+        .or_else(|| devices.first())
+        .map(|device| device.id.clone());
+    PxlogicHardwareState {
+        devices,
+        selected_device_id,
+        firmware_resource_ready: payload.firmware.is_file(),
+        bitstream_resources_ready: payload.bitstreams.join("hspi_ddr.bin").is_file()
+            && payload.bitstreams.join("hspi_ddr_RST.bin").is_file(),
+        error: None,
+    }
 }
 
 fn update_bridge_state(app: &AppHandle, next: BridgeState) {
@@ -1475,13 +1826,15 @@ fn hide_main_window(app: &AppHandle) {
 #[tauri::command]
 async fn client_initial_state(app: AppHandle) -> Result<InitialState, String> {
     let worker_app = app.clone();
-    let (mut settings, applications) = tauri::async_runtime::spawn_blocking(move || {
+    let (mut settings, applications, hardware) = tauri::async_runtime::spawn_blocking(move || {
         let settings = load_settings(&worker_app);
         let applications = scan_logic_paths(Some(&settings.logic_app_path));
-        (settings, applications)
+        let hardware = scan_pxlogic_hardware(&worker_app, &settings.pxlogic_device_id);
+        (settings, applications, hardware)
     })
     .await
-    .map_err(|error| format!("Logic 扫描任务失败: {error}"))?;
+    .map_err(|error| format!("启动检查任务失败: {error}"))?;
+    let mut settings_changed = false;
     if settings.logic_app_path.is_empty() {
         if let Some(preferred) = applications
             .iter()
@@ -1489,8 +1842,17 @@ async fn client_initial_state(app: AppHandle) -> Result<InitialState, String> {
             .or_else(|| applications.first())
         {
             settings.logic_app_path = preferred.path.clone();
-            settings = store_settings(&app, settings)?;
+            settings_changed = true;
         }
+    }
+    if let Some(selected_device_id) = hardware.selected_device_id.as_deref() {
+        if settings.pxlogic_device_id != selected_device_id {
+            settings.pxlogic_device_id = selected_device_id.to_string();
+            settings_changed = true;
+        }
+    }
+    if settings_changed {
+        settings = store_settings(&app, settings)?;
     }
     let state = app.state::<AppState>();
     let bridge_state = state
@@ -1508,6 +1870,7 @@ async fn client_initial_state(app: AppHandle) -> Result<InitialState, String> {
     Ok(InitialState {
         settings,
         applications,
+        hardware,
         bridge_state,
         logs,
     })
@@ -1533,6 +1896,18 @@ async fn logic_inspect(app_path: String) -> Result<LogicInspection, String> {
     tauri::async_runtime::spawn_blocking(move || inspect_logic_path(Path::new(app_path.trim())))
         .await
         .map_err(|error| format!("Logic 检查任务失败: {error}"))
+}
+
+#[tauri::command]
+async fn pxlogic_scan(
+    app: AppHandle,
+    preferred_device_id: String,
+) -> Result<PxlogicHardwareState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        scan_pxlogic_hardware(&app, preferred_device_id.trim())
+    })
+    .await
+    .map_err(|error| format!("PXLogic 扫描任务失败: {error}"))
 }
 
 #[tauri::command]
@@ -1605,7 +1980,7 @@ async fn bridge_start(app: AppHandle, settings: ClientSettings) -> Result<Bridge
 }
 
 fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<BridgeState, String> {
-    let settings = store_settings(app, settings)?;
+    let mut settings = store_settings(app, settings)?;
     let selected_app_path = PathBuf::from(&settings.logic_app_path);
     let app_path = resolve_logic_installation(&selected_app_path)?;
     let inspection = inspect_logic_path(&selected_app_path);
@@ -1614,7 +1989,28 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
             .error
             .unwrap_or_else(|| "Logic 2 安装无效".to_string()));
     }
+    let hardware = scan_pxlogic_hardware(app, &settings.pxlogic_device_id);
+    if let Some(error) = hardware.error {
+        return Err(error);
+    }
+    let selected_device_id = hardware
+        .selected_device_id
+        .ok_or_else(|| "未检测到 PXLogic 设备".to_string())?;
+    let selected_device = hardware
+        .devices
+        .iter()
+        .find(|device| device.id == selected_device_id)
+        .ok_or_else(|| "所选 PXLogic 设备已断开".to_string())?;
+    if !selected_device.ready {
+        return Err(selected_device
+            .probe_error
+            .clone()
+            .unwrap_or_else(|| "所选 PXLogic 设备尚未就绪".to_string()));
+    }
+    settings.pxlogic_device_id = selected_device_id;
+    settings = store_settings(app, settings)?;
     let payload = validate_bridge_payload(app)?;
+    let extension_status = install_decoder_extensions(app)?;
     let executable = logic_executable(&app_path);
     let runtime_app_path = app_path.to_string_lossy().into_owned();
     let helper = payload.helper.to_string_lossy().into_owned();
@@ -1637,6 +2033,11 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
         .args(["--pxlogic-helper", &helper])
         .args(["--bitstreams", &bitstreams])
         .args(["--firmware", &firmware])
+        .args(["--pxlogic-device", &settings.pxlogic_device_id])
+        .args([
+            "--hardware-threshold-volts",
+            &settings.pxlogic_threshold_volts.to_string(),
+        ])
         .current_dir(&payload.bridge_root)
         .env("ELECTRON_RUN_AS_NODE", "1")
         .stdin(Stdio::null())
@@ -1687,6 +2088,7 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
             inspection.version.unwrap_or_default()
         ),
     );
+    append_log(app, "client", &extension_status);
     read_process_lines(app.clone(), "bridge", stdout);
     read_process_lines(app.clone(), "runtime", stderr);
     monitor_bridge(app.clone(), token);
@@ -1805,6 +2207,7 @@ fn main() {
             logic_scan,
             logic_inspect,
             logic_browse,
+            pxlogic_scan,
             bridge_start,
             bridge_stop,
             logs_open,
@@ -1849,6 +2252,8 @@ mod tests {
             preferred_port: 43210,
             screen_quadrant: 9,
             maximize_logic_window: true,
+            pxlogic_device_id: "  usb:1234  ".to_string(),
+            pxlogic_threshold_volts: 4.2,
         }
         .normalized();
         assert_eq!(settings.logic_app_path, "/Applications/Saleae Logic.app");
@@ -1856,6 +2261,8 @@ mod tests {
         assert_eq!(settings.preferred_port, 43210);
         assert_eq!(settings.screen_quadrant, 3);
         assert!(settings.maximize_logic_window);
+        assert_eq!(settings.pxlogic_device_id, "usb:1234");
+        assert_eq!(settings.pxlogic_threshold_volts, 1.8);
     }
 
     #[test]
@@ -1865,6 +2272,75 @@ mod tests {
         )
         .unwrap();
         assert!(settings.maximize_logic_window);
+        assert_eq!(settings.pxlogic_device_id, "");
+        assert_eq!(settings.pxlogic_threshold_volts, 1.8);
+    }
+
+    #[test]
+    fn installs_decoder_extensions_without_touching_other_extensions() {
+        let mut config = serde_json::json!({
+            "installedExtensions": {
+                "version": 2,
+                "extensions": [
+                    { "path": "/tmp/another/extension.json", "type": "Local", "isDisabled": true }
+                ]
+            }
+        });
+        assert!(update_decoder_extension_config(
+            &mut config,
+            "qmi8660",
+            Path::new("/Applications/PXLogic Bridge.app/Contents/Resources/tools/logic2-bridge/extensions/qmi8660/extension.json")
+        )
+        .unwrap());
+        let extensions = config["installedExtensions"]["extensions"]
+            .as_array()
+            .unwrap();
+        assert_eq!(extensions.len(), 2);
+        assert_eq!(extensions[0]["path"], "/tmp/another/extension.json");
+        assert_eq!(extensions[0]["isDisabled"], true);
+        assert_eq!(extensions[1]["type"], "Local");
+    }
+
+    #[test]
+    fn refreshes_stale_qmi8660_path_and_preserves_disabled_state() {
+        let mut config = serde_json::json!({
+            "installedExtensions": {
+                "version": 2,
+                "extensions": [
+                    {
+                        "path": "/old/tools/logic2-bridge/extensions/qmi8660/extension.json",
+                        "type": "Local",
+                        "isFromWeb": true,
+                        "isDisabled": true
+                    }
+                ]
+            }
+        });
+        let desired = Path::new("/new/tools/logic2-bridge/extensions/qmi8660/extension.json");
+        assert!(update_decoder_extension_config(&mut config, "qmi8660", desired).unwrap());
+        let extension = &config["installedExtensions"]["extensions"][0];
+        assert_eq!(extension["path"], desired.to_string_lossy().as_ref());
+        assert_eq!(extension["isFromWeb"], false);
+        assert_eq!(extension["isDisabled"], true);
+        assert!(!update_decoder_extension_config(&mut config, "qmi8660", desired).unwrap());
+    }
+
+    #[test]
+    fn installs_three_decoder_manifests_as_independent_extensions() {
+        let mut config = serde_json::json!({});
+        for directory in ["qmi8660", "qmi8658", "qma6100p"] {
+            let path = PathBuf::from(format!(
+                "/opt/pxlogic/extensions/{directory}/extension.json"
+            ));
+            assert!(update_decoder_extension_config(&mut config, directory, &path).unwrap());
+        }
+        let extensions = config["installedExtensions"]["extensions"]
+            .as_array()
+            .unwrap();
+        assert_eq!(extensions.len(), 3);
+        assert!(extensions
+            .iter()
+            .all(|extension| extension["type"] == "Local"));
     }
 
     #[test]
@@ -1945,6 +2421,10 @@ mod tests {
         assert!(profile_runnable("verified", "darwin", "arm64"));
         assert!(profile_runnable("pending-live-validation", "win32", "x64"));
         assert!(!profile_runnable("pending-live-validation", "linux", "x64"));
-        assert!(!profile_runnable("pending-live-validation", "win32", "arm64"));
+        assert!(!profile_runnable(
+            "pending-live-validation",
+            "win32",
+            "arm64"
+        ));
     }
 }

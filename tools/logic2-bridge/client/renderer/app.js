@@ -11,6 +11,7 @@ function createTauriApi() {
     scanLogicApps: savedPath => invoke('logic_scan', { savedPath }),
     inspectLogicApp: appPath => invoke('logic_inspect', { appPath }),
     browseLogicApp: () => invoke('logic_browse'),
+    scanHardware: preferredDeviceId => invoke('pxlogic_scan', { preferredDeviceId }),
     start: settings => invoke('bridge_start', { settings }),
     stop: () => invoke('bridge_stop'),
     openLogs: () => invoke('logs_open'),
@@ -32,6 +33,15 @@ const elements = {
   compatibility: document.querySelector('#logic-compatibility'),
   rescanButton: document.querySelector('#rescan-button'),
   browseButton: document.querySelector('#browse-button'),
+  pxlogicSummary: document.querySelector('#pxlogic-summary'),
+  pxlogicRescanButton: document.querySelector('#pxlogic-rescan-button'),
+  pxlogicDevice: document.querySelector('#pxlogic-device'),
+  pxlogicThreshold: document.querySelector('#pxlogic-threshold'),
+  pxlogicSerial: document.querySelector('#pxlogic-serial'),
+  pxlogicUsbSpeed: document.querySelector('#pxlogic-usb-speed'),
+  pxlogicFirmware: document.querySelector('#pxlogic-firmware'),
+  pxlogicBitstream: document.querySelector('#pxlogic-bitstream'),
+  pxlogicComparator: document.querySelector('#pxlogic-comparator'),
   portAuto: document.querySelector('#port-auto'),
   portFixed: document.querySelector('#port-fixed'),
   preferredPort: document.querySelector('#preferred-port'),
@@ -47,10 +57,34 @@ const elements = {
 let portMode = 'auto';
 let currentState = { phase: 'stopped', actualPort: null, message: '待机' };
 let currentInspection = null;
+let currentHardware = null;
+let hardwareScanning = false;
 let inspectionSequence = 0;
 
 function isActive() {
   return ['starting', 'running', 'stopping'].includes(currentState.phase);
+}
+
+function selectedHardwareDevice() {
+  const selectedId = currentHardware?.selectedDeviceId || elements.pxlogicDevice.value;
+  return currentHardware?.devices?.find(device => device.id === selectedId) || null;
+}
+
+function formatUsbSpeed(speed) {
+  const labels = {
+    low: 'USB 1.x Low-Speed',
+    full: 'USB 1.x Full-Speed',
+    high: 'USB 2.0 High-Speed',
+    super: 'USB 3.x SuperSpeed',
+    'super-plus': 'USB 3.x SuperSpeed+',
+  };
+  return labels[String(speed || '').toLowerCase()] || speed || '--';
+}
+
+function isHardwareReady() {
+  const device = selectedHardwareDevice();
+  return Boolean(device?.ready && currentHardware?.firmwareResourceReady &&
+    currentHardware?.bitstreamResourcesReady && !currentHardware?.error);
 }
 
 function renderState(state) {
@@ -72,12 +106,16 @@ function renderState(state) {
   elements.logicPath.disabled = disableSettings;
   elements.rescanButton.disabled = disableSettings;
   elements.browseButton.disabled = disableSettings;
+  elements.pxlogicRescanButton.disabled = disableSettings || hardwareScanning;
+  elements.pxlogicDevice.disabled = disableSettings || hardwareScanning ||
+    !currentHardware?.devices?.length;
+  elements.pxlogicThreshold.disabled = disableSettings;
   elements.portAuto.disabled = disableSettings;
   elements.portFixed.disabled = disableSettings;
   elements.preferredPort.disabled = disableSettings || portMode !== 'fixed';
   elements.screenQuadrant.disabled = disableSettings;
   elements.startButton.disabled = state.phase === 'starting' || state.phase === 'stopping' ||
-    (!disableSettings && !currentInspection?.runnable);
+    (!disableSettings && (!currentInspection?.runnable || !isHardwareReady()));
 }
 
 function setPortMode(mode) {
@@ -133,6 +171,58 @@ function renderApplications(applications) {
   }
 }
 
+function renderHardware(hardware) {
+  currentHardware = hardware;
+  elements.pxlogicDevice.replaceChildren();
+  for (const device of hardware?.devices || []) {
+    const option = document.createElement('option');
+    option.value = device.id;
+    const model = device.profileModel || device.product || device.label || 'PXLogic';
+    option.textContent = device.serialNumber ? `${model} · ${device.serialNumber}` : model;
+    elements.pxlogicDevice.append(option);
+  }
+  if (!hardware?.devices?.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '未检测到设备';
+    elements.pxlogicDevice.append(option);
+  }
+  elements.pxlogicDevice.value = hardware?.selectedDeviceId || '';
+  const device = selectedHardwareDevice();
+  if (hardware?.error) {
+    elements.pxlogicSummary.textContent = hardware.error;
+  } else if (!device) {
+    elements.pxlogicSummary.textContent = '未检测到 PXLogic';
+  } else if (device.ready) {
+    elements.pxlogicSummary.textContent = device.profileModel || device.label || 'PXLogic 已就绪';
+  } else {
+    elements.pxlogicSummary.textContent = device.probeError || '设备尚未就绪';
+  }
+  elements.pxlogicSerial.textContent = device?.serialNumber || '--';
+  elements.pxlogicSerial.title = device?.serialNumber || '';
+  elements.pxlogicUsbSpeed.textContent = formatUsbSpeed(device?.usbSpeed);
+  elements.pxlogicUsbSpeed.title = formatUsbSpeed(device?.usbSpeed);
+  elements.pxlogicFirmware.textContent = hardware?.firmwareResourceReady
+    ? device?.ready ? '就绪' : '资源就绪'
+    : '缺失';
+  elements.pxlogicBitstream.textContent = hardware?.bitstreamResourcesReady ? '自动加载' : '缺失';
+  elements.pxlogicFirmware.classList.toggle(
+    'hardware-error',
+    !hardware?.firmwareResourceReady || Boolean(device && !device.ready),
+  );
+  elements.pxlogicBitstream.classList.toggle(
+    'hardware-error',
+    !hardware?.bitstreamResourcesReady,
+  );
+  updateComparatorLabel();
+  renderState(currentState);
+}
+
+function updateComparatorLabel() {
+  const level = Number(elements.pxlogicThreshold.value || 1.8);
+  elements.pxlogicComparator.textContent = `${(level * 0.5).toFixed(2)} V`;
+}
+
 async function inspectPath() {
   const sequence = ++inspectionSequence;
   const inspection = await api.inspectLogicApp(elements.logicPath.value.trim());
@@ -147,6 +237,8 @@ function readSettings() {
     preferredPort: Number(elements.preferredPort.value),
     screenQuadrant: windowPosition === 'maximized' ? 3 : Number(windowPosition),
     maximizeLogicWindow: windowPosition === 'maximized',
+    pxlogicDeviceId: elements.pxlogicDevice.value,
+    pxlogicThresholdVolts: Number(elements.pxlogicThreshold.value),
   };
 }
 
@@ -203,6 +295,29 @@ elements.browseButton.addEventListener('click', async () => {
   renderInspection(inspection);
   persistSettings();
 });
+elements.pxlogicDevice.addEventListener('change', () => {
+  if (currentHardware) currentHardware.selectedDeviceId = elements.pxlogicDevice.value;
+  renderHardware(currentHardware);
+  persistSettings();
+});
+elements.pxlogicThreshold.addEventListener('change', () => {
+  updateComparatorLabel();
+  persistSettings();
+});
+elements.pxlogicRescanButton.addEventListener('click', async () => {
+  hardwareScanning = true;
+  renderState(currentState);
+  try {
+    const hardware = await api.scanHardware(elements.pxlogicDevice.value);
+    renderHardware(hardware);
+    persistSettings();
+  } catch (error) {
+    appendLog(`[client] ${errorMessage(error)}`);
+  } finally {
+    hardwareScanning = false;
+    renderState(currentState);
+  }
+});
 elements.openLogsButton.addEventListener('click', () => api.openLogs());
 elements.startButton.addEventListener('click', async () => {
   try {
@@ -227,10 +342,12 @@ async function initialize() {
   renderApplications(initial.applications);
   elements.logicPath.value = initial.settings.logicAppPath;
   elements.preferredPort.value = initial.settings.preferredPort;
+  elements.pxlogicThreshold.value = String(initial.settings.pxlogicThresholdVolts || 1.8);
   elements.screenQuadrant.value = initial.settings.maximizeLogicWindow === false
     ? String(initial.settings.screenQuadrant)
     : 'maximized';
   setPortMode(initial.settings.portMode);
+  renderHardware(initial.hardware);
   if (initial.logs.length) {
     elements.logOutput.textContent = initial.logs.slice(-120).join('\n');
   }

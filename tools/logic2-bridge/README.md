@@ -117,11 +117,35 @@ Logic. It displays the detected version, accepts a manually entered or selected
 `.app` path, remembers the settings, and remains available from the macOS menu
 bar while its window is hidden.
 
+The PXLogic hardware panel uses the packaged capture helper for read-only USB
+discovery. It shows the detected model, serial number, USB link speed, and the
+packaged firmware/FPGA resource status, and it supports selecting a specific
+device when more than one is connected. The selected device is checked again
+immediately before the Bridge starts.
+
+PXLogic hardware levels use the same nominal choices exposed by PXView: 1.8 V,
+2.5 V, 3.3 V, and 5.0 V. The selected level is owned by the Bridge and converted
+by the PXLogic backend to the physical comparator threshold (one half of the
+nominal level). Logic 2 remains authoritative for enabled channels, sample
+rate, capture control, triggers, software glitch filters, and analyzers.
+
 Click `Start Logic 2` after an installation matching a verified compatibility
 profile is shown.
+Before launching Logic, the client copies its bundled QMI8660, QMI8658A, and
+QMA6100P High Level Analyzers to separate stable per-user data directories and
+registers each manifest as a Logic 2 local extension. Existing extensions are
+preserved, duplicate or stale paths are replaced, and user-disabled entries
+stay disabled.
 The client launches Logic with the required `--useExistingGraph` and
 `--graphPort` arguments. In Logic 2 select the Demo Logic Pro 16 device as the
 session device.
+
+To decode sensor traffic, first add Logic 2's built-in I2C or SPI analyzer,
+then add the matching `QMI8660`, `QMI8658A`, or `QMA6100P` HLA on top of it.
+QMI8660 and QMI8658A default to I2C addresses `0x6A`/`0x6B`; QMA6100P defaults
+to `0x12`/`0x13`. All three SPI protocols use bit 7 as the read flag, and using
+the Enable/CS channel gives exact transaction boundaries. Each decoder tracks
+its configured full scales and converts data/FIFO samples to physical units.
 
 Automatic port mode asks macOS for a free loopback TCP port, then passes the
 actual value to Logic 2. The port is not fixed by Logic. In fixed mode the

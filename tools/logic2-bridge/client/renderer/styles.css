@@ -14,7 +14,7 @@ body {
   margin: 0;
   height: 100vh;
   min-width: 720px;
-  min-height: 590px;
+  min-height: 660px;
   display: grid;
   grid-template-rows: 80px minmax(0, 1fr) 72px;
   background: #f2f3f5;
@@ -276,6 +276,53 @@ select:focus {
 
 .number-input {
   width: 100%;
+}
+
+.hardware-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(180px, 0.8fr);
+  gap: 22px;
+}
+
+.hardware-controls select {
+  width: 100%;
+}
+
+.hardware-status-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid #dde0e4;
+}
+
+.hardware-status-row div {
+  min-width: 0;
+}
+
+.hardware-status-row span,
+.hardware-status-row strong {
+  display: block;
+}
+
+.hardware-status-row span {
+  margin-bottom: 4px;
+  color: #7a7f87;
+  font-size: 11px;
+}
+
+.hardware-status-row strong {
+  overflow: hidden;
+  color: #33363b;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hardware-status-row strong.hardware-error {
+  color: #a03b2d;
 }
 
 .activity-section {

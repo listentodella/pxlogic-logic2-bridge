@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const {
   app,
   BrowserWindow,
@@ -20,7 +20,10 @@ const DEFAULT_SETTINGS = Object.freeze({
   preferredPort: 12472,
   screenQuadrant: 3,
   maximizeLogicWindow: true,
+  pxlogicDeviceId: '',
+  pxlogicThresholdVolts: 1.8,
 });
+const PXVIEW_THRESHOLD_VOLTAGES = [1.8, 2.5, 3.3, 5.0];
 
 let mainWindow;
 let tray;
@@ -39,6 +42,83 @@ function bridgeApi() {
   return require(path.join(bridgeRoot(), 'index.cjs'));
 }
 
+function payloadRoot() {
+  return app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..', '..', '..');
+}
+
+function scanHardware(preferredDeviceId = '') {
+  const root = payloadRoot();
+  const helper = path.join(
+    root,
+    'target',
+    'release',
+    process.platform === 'win32' ? 'usb_smoke.exe' : 'usb_smoke',
+  );
+  const firmware = path.join(root, 'resources', 'firmware', 'SCI_LOGIC.bin');
+  const bitstream = path.join(root, 'resources', 'bitstreams', 'hspi_ddr.bin');
+  const resetBitstream = path.join(root, 'resources', 'bitstreams', 'hspi_ddr_RST.bin');
+  if (!fs.existsSync(helper)) {
+    return {
+      devices: [], selectedDeviceId: null,
+      firmwareResourceReady: fs.existsSync(firmware),
+      bitstreamResourcesReady: fs.existsSync(bitstream) && fs.existsSync(resetBitstream),
+      error: `PXLogic helper 不存在: ${helper}`,
+    };
+  }
+  const result = spawnSync(helper, ['--list-json'], {
+    cwd: path.dirname(helper),
+    env: {
+      ...process.env,
+      PXLOGIC_BITSTREAM_DIR: path.dirname(bitstream),
+      PXLOGIC_MCU_FIRMWARE: firmware,
+    },
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0) {
+    return {
+      devices: [], selectedDeviceId: null,
+      firmwareResourceReady: fs.existsSync(firmware),
+      bitstreamResourcesReady: fs.existsSync(bitstream) && fs.existsSync(resetBitstream),
+      error: `PXLogic 设备扫描失败: ${(result.stderr || result.error?.message || '').trim()}`,
+    };
+  }
+  try {
+    const devices = JSON.parse(result.stdout).map(device => ({
+      id: device.id,
+      vid: device.vid,
+      pid: device.pid,
+      bus: device.bus,
+      address: device.address,
+      label: device.label,
+      ready: device.ready,
+      manufacturer: device.manufacturer,
+      product: device.product,
+      serialNumber: device.serial_number,
+      usbSpeed: device.usb_speed,
+      logicMode: device.logic_mode,
+      profileModel: device.profile_model,
+      probeError: device.probe_error,
+    }));
+    const selected = devices.find(device => device.id === preferredDeviceId) ||
+      devices.find(device => device.ready) || devices[0];
+    return {
+      devices,
+      selectedDeviceId: selected?.id || null,
+      firmwareResourceReady: fs.existsSync(firmware),
+      bitstreamResourcesReady: fs.existsSync(bitstream) && fs.existsSync(resetBitstream),
+      error: null,
+    };
+  } catch (error) {
+    return {
+      devices: [], selectedDeviceId: null,
+      firmwareResourceReady: fs.existsSync(firmware),
+      bitstreamResourcesReady: fs.existsSync(bitstream) && fs.existsSync(resetBitstream),
+      error: `PXLogic 设备扫描响应无效: ${error.message}`,
+    };
+  }
+}
+
 function settingsPath() {
   return path.join(app.getPath('userData'), 'settings.json');
 }
@@ -47,6 +127,7 @@ function normalizeSettings(value = {}) {
   const portMode = value.portMode === 'fixed' ? 'fixed' : 'auto';
   const preferredPort = Number(value.preferredPort);
   const screenQuadrant = Number(value.screenQuadrant);
+  const pxlogicThresholdVolts = Number(value.pxlogicThresholdVolts);
   return {
     logicAppPath: typeof value.logicAppPath === 'string' ? value.logicAppPath.trim() : '',
     portMode,
@@ -57,6 +138,12 @@ function normalizeSettings(value = {}) {
       ? screenQuadrant
       : DEFAULT_SETTINGS.screenQuadrant,
     maximizeLogicWindow: value.maximizeLogicWindow !== false,
+    pxlogicDeviceId: typeof value.pxlogicDeviceId === 'string'
+      ? value.pxlogicDeviceId.trim()
+      : '',
+    pxlogicThresholdVolts: PXVIEW_THRESHOLD_VOLTAGES.includes(pxlogicThresholdVolts)
+      ? pxlogicThresholdVolts
+      : DEFAULT_SETTINGS.pxlogicThresholdVolts,
   };
 }
 
@@ -78,16 +165,20 @@ function saveSettings(value) {
 }
 
 function inspectLogicApp(appPath) {
-  if (!appPath) return { path: '', version: null, supported: false, error: '未选择 Logic 2' };
+  if (!appPath) {
+    return {
+      path: '', version: null, supported: false, runnable: false, error: '未选择 Logic 2',
+    };
+  }
   const resolvedPath = path.resolve(appPath);
   let version = null;
   try {
     const api = bridgeApi();
     version = api.readAppVersion(resolvedPath);
     api.resolveRuntime({ appPath: resolvedPath });
-    return { path: resolvedPath, version, supported: true, error: null };
+    return { path: resolvedPath, version, supported: true, runnable: true, error: null };
   } catch (error) {
-    return { path: resolvedPath, version, supported: false, error: error.message };
+    return { path: resolvedPath, version, supported: false, runnable: false, error: error.message };
   }
 }
 
@@ -136,6 +227,13 @@ function startBridge(rawSettings) {
   const settings = saveSettings(rawSettings);
   const logic = inspectLogicApp(settings.logicAppPath);
   if (!logic.supported) throw new Error(logic.error || 'Logic 2 安装无效');
+  const hardware = scanHardware(settings.pxlogicDeviceId);
+  if (hardware.error) throw new Error(hardware.error);
+  const selectedDevice = hardware.devices.find(device => device.id === hardware.selectedDeviceId);
+  if (!selectedDevice) throw new Error('未检测到 PXLogic 设备');
+  if (!selectedDevice.ready) throw new Error(selectedDevice.probeError || 'PXLogic 设备尚未就绪');
+  settings.pxlogicDeviceId = selectedDevice.id;
+  saveSettings(settings);
 
   const args = [
     // Keep the entry relative to cwd.  Electron's Windows RunAsNode parser
@@ -143,6 +241,8 @@ function startBridge(rawSettings) {
     'index.cjs',
     '--app', settings.logicAppPath,
     '--port', settings.portMode === 'auto' ? 'auto' : String(settings.preferredPort),
+    '--pxlogic-device', settings.pxlogicDeviceId,
+    '--hardware-threshold-volts', String(settings.pxlogicThresholdVolts),
   ];
   if (settings.maximizeLogicWindow) args.push('--maximize-window');
   else args.push('--screen-quadrant', String(settings.screenQuadrant));
@@ -223,9 +323,9 @@ function createTray() {
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 840,
-    height: 680,
+    height: 780,
     minWidth: 720,
-    minHeight: 590,
+    minHeight: 660,
     title: 'PXLogic Bridge',
     backgroundColor: '#f2f3f5',
     show: false,
@@ -255,11 +355,17 @@ ipcMain.handle('client:initial-state', () => {
     settings.logicAppPath = preferred.path;
     saveSettings(settings);
   }
-  return { settings, applications, bridgeState, logs: logLines };
+  const hardware = scanHardware(settings.pxlogicDeviceId);
+  if (hardware.selectedDeviceId && hardware.selectedDeviceId !== settings.pxlogicDeviceId) {
+    settings.pxlogicDeviceId = hardware.selectedDeviceId;
+    saveSettings(settings);
+  }
+  return { settings, applications, hardware, bridgeState, logs: logLines };
 });
 ipcMain.handle('client:save-settings', (_event, settings) => saveSettings(settings));
 ipcMain.handle('logic:scan', (_event, savedPath) => discoverLogicApps(savedPath));
 ipcMain.handle('logic:inspect', (_event, appPath) => inspectLogicApp(appPath));
+ipcMain.handle('pxlogic:scan', (_event, preferredDeviceId) => scanHardware(preferredDeviceId));
 ipcMain.handle('logic:browse', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: '选择 Saleae Logic 2',

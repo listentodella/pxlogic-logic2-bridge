@@ -45,6 +45,40 @@
         </div>
       </section>
 
+      <section class="settings-section hardware-section">
+        <div class="section-heading">
+          <div>
+            <h2>PXLogic 硬件</h2>
+            <p id="pxlogic-summary">正在检测设备...</p>
+          </div>
+          <button id="pxlogic-rescan-button" class="secondary-button" type="button">重新检测</button>
+        </div>
+
+        <div class="hardware-controls">
+          <div>
+            <label for="pxlogic-device">设备</label>
+            <select id="pxlogic-device"></select>
+          </div>
+          <div>
+            <label for="pxlogic-threshold">目标逻辑电平</label>
+            <select id="pxlogic-threshold">
+              <option value="1.8">1.8 V</option>
+              <option value="2.5">2.5 V</option>
+              <option value="3.3">3.3 V</option>
+              <option value="5">5.0 V</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="hardware-status-row">
+          <div><span>序列号</span><strong id="pxlogic-serial">--</strong></div>
+          <div><span>USB</span><strong id="pxlogic-usb-speed">--</strong></div>
+          <div><span>固件</span><strong id="pxlogic-firmware">--</strong></div>
+          <div><span>FPGA</span><strong id="pxlogic-bitstream">--</strong></div>
+          <div><span>比较阈值</span><strong id="pxlogic-comparator">0.90 V</strong></div>
+        </div>
+      </section>
+
       <section class="settings-section connection-section">
         <div class="section-heading compact-heading">
           <div>

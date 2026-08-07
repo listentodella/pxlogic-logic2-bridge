@@ -6,3 +6,5 @@
 /tools/logic2-bridge/tauri-client/node_modules/
 /tools/logic2-bridge/tauri-client/src-tauri/target/
 .DS_Store
+__pycache__/
+*.py[cod]

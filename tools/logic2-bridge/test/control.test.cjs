@@ -62,3 +62,18 @@ test('observes a Logic trigger without storing PXLogic hardware trigger state', 
     logicSoftwareGlitchFilterWidths: {},
   });
 });
+
+test('keeps the Bridge hardware threshold independent from Logic UI voltage', () => {
+  const controller = new PxlogicCaptureController({
+    enabledChannels: [0, 1, 2, 3],
+    sampleRateHz: 25_000_000,
+    thresholdVolts: 2.0,
+    hardwareThresholdVolts: 2.5,
+  }, {});
+  controller.applySetting(4, {
+    type: 'Saleae::Graph::LogicDevice::SetDigitalVoltageThreshold',
+    thresholdDescription: '1.8 Volts',
+  });
+  assert.equal(controller.getSessionSettings(4).thresholdVolts, 1.8);
+  assert.equal(controller.options.hardwareThresholdVolts, 2.5);
+});

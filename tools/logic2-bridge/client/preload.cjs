@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('pxlogicBridge', {
   scanLogicApps: savedPath => ipcRenderer.invoke('logic:scan', savedPath),
   inspectLogicApp: appPath => ipcRenderer.invoke('logic:inspect', appPath),
   browseLogicApp: () => ipcRenderer.invoke('logic:browse'),
+  scanHardware: preferredDeviceId => ipcRenderer.invoke('pxlogic:scan', preferredDeviceId),
   start: settings => ipcRenderer.invoke('bridge:start', settings),
   stop: () => ipcRenderer.invoke('bridge:stop'),
   openLogs: () => ipcRenderer.invoke('logs:open'),
