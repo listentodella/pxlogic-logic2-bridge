@@ -393,7 +393,7 @@ jobs:
       - name: Verify application bundle
         run: |
           set -euo pipefail
-          app_root="target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app"
+          app_root="tools/logic2-bridge/tauri-client/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app"
           app_executable="$app_root/Contents/MacOS/pxlogic-logic2-bridge-client"
           resources="$app_root/Contents/Resources"
           bridge_entry="$resources/tools/logic2-bridge/index.cjs"
@@ -414,7 +414,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           ditto -c -k --sequesterRsrc --keepParent \
-            "target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app" \
+            "tools/logic2-bridge/tauri-client/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app" \
             "dist/pxlogic-logic2-bridge-macos-arm64.zip"
           unzip -t "dist/pxlogic-logic2-bridge-macos-arm64.zip"
 
@@ -518,7 +518,7 @@ jobs:
           set -euo pipefail
           file tools/logic2-bridge/build/payload/graph-host | grep -E 'ELF 64-bit|x86-64'
           file tools/logic2-bridge/build/payload/usb_smoke | grep -E 'ELF 64-bit|x86-64'
-          source_appimage="$(find target/x86_64-unknown-linux-gnu/release/bundle/appimage \
+          source_appimage="$(find tools/logic2-bridge/tauri-client/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage \
             -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
           test -n "$source_appimage"
           mkdir -p dist
@@ -629,7 +629,7 @@ jobs:
             (Join-Path $stage 'resources/bitstreams'), `
             (Join-Path $stage 'resources/firmware') | Out-Null
 
-          Copy-Item 'target/x86_64-pc-windows-msvc/release/pxlogic-logic2-bridge-client.exe' `
+          Copy-Item 'tools/logic2-bridge/tauri-client/src-tauri/target/x86_64-pc-windows-msvc/release/pxlogic-logic2-bridge-client.exe' `
             (Join-Path $stage 'PXLogic Bridge.exe')
           Copy-Item 'tools/logic2-bridge/index.cjs' $bridge
           Copy-Item 'tools/logic2-bridge/lib/*' (Join-Path $bridge 'lib') -Recurse

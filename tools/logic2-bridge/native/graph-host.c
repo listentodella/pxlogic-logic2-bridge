@@ -706,6 +706,8 @@ static void write_absolute_branch(uint8_t *destination, const void *target) {
   memcpy(destination + 6, &address, sizeof(address));
 }
 
+#endif
+
 #if defined(_WIN32)
 static bool set_code_page_protection(void *address, size_t length,
                                      DWORD protection, DWORD *previous) {
@@ -718,7 +720,6 @@ static bool set_code_page_protection(void *address, size_t length, int protectio
   const uintptr_t end = ((uintptr_t)address + length + page_size - 1u) & ~(page_size - 1u);
   return mprotect((void *)begin, end - begin, protection) == 0;
 }
-#endif
 #endif
 
 static void inject_capture_buffer(SaleaeBuffer *buffer) {
