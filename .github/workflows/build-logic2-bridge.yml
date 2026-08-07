@@ -2,6 +2,10 @@ name: Build Logic 2 Bridge
 
 on:
   push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
     paths:
       - ".github/workflows/build-logic2-bridge.yml"
       - "tools/logic2-bridge/**"
@@ -74,8 +78,9 @@ jobs:
     name: Portable layer (${{ matrix.os_name }})
     if: >-
       ${{
-        github.event_name == 'workflow_dispatch' &&
-        (inputs.platform == 'macos' || inputs.platform == 'all')
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' &&
+        (inputs.platform == 'macos' || inputs.platform == 'all'))
       }}
     strategy:
       fail-fast: false
@@ -107,8 +112,9 @@ jobs:
     name: PXLogic helper (${{ matrix.os_name }})
     if: >-
       ${{
-        github.event_name == 'workflow_dispatch' &&
-        (inputs.platform == 'macos' || inputs.platform == 'all')
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' &&
+        (inputs.platform == 'macos' || inputs.platform == 'all'))
       }}
     strategy:
       fail-fast: false
@@ -166,8 +172,9 @@ jobs:
     name: Tauri client check (${{ matrix.os_name }})
     if: >-
       ${{
-        github.event_name == 'workflow_dispatch' &&
-        (inputs.platform == 'macos' || inputs.platform == 'all')
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' &&
+        (inputs.platform == 'macos' || inputs.platform == 'all'))
       }}
     strategy:
       fail-fast: false
@@ -356,8 +363,9 @@ jobs:
     name: Desktop client (macOS arm64, Tauri)
     if: >-
       ${{
-        github.event_name == 'workflow_dispatch' &&
-        (inputs.platform == 'macos' || inputs.platform == 'all')
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' &&
+        (inputs.platform == 'macos' || inputs.platform == 'all'))
       }}
     needs: [portable-layer, capture-helper, tauri-client-check]
     runs-on: macos-15
@@ -771,3 +779,43 @@ jobs:
             dist/pxlogic-logic2-bridge-windows-x64.zip
           if-no-files-found: error
           retention-days: 7
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - sensor-extensions
+      - build-macos-arm64
+      - build-linux-x64
+      - build-windows-x64
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download portable applications
+        uses: actions/download-artifact@v7
+        with:
+          pattern: pxlogic-logic2-bridge-client-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify release assets
+        run: |
+          set -euo pipefail
+          test -f release-assets/pxlogic-logic2-bridge-macos-arm64.zip
+          test -f release-assets/pxlogic-logic2-bridge-windows-x64.zip
+          test -f release-assets/PXLogic-Bridge-linux-x86_64.AppImage
+          test -f release-assets/pxlogic-logic2-bridge-linux-x64.tar.gz
+          find release-assets -maxdepth 1 -type f -print | sort
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: PXLogic Logic 2 Bridge ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/pxlogic-logic2-bridge-macos-arm64.zip
+            release-assets/pxlogic-logic2-bridge-windows-x64.zip
+            release-assets/PXLogic-Bridge-linux-x86_64.AppImage
+            release-assets/pxlogic-logic2-bridge-linux-x64.tar.gz
