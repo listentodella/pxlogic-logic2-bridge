@@ -164,21 +164,15 @@ software glitch filters, and analyzers.
 Click `Start Logic 2` after a verified profile is shown. For a locally analyzed
 candidate, review the automatic-candidate status and use `启动实验验证`; an
 unsupported result is not injected.
-Before launching Logic, the client copies its bundled QMI8660, QMI8658A, and
-QMA6100P High Level Analyzers to separate stable per-user data directories and
-registers each manifest as a Logic 2 local extension. Existing extensions are
-preserved, duplicate or stale paths are replaced, and user-disabled entries
-stay disabled.
 The client launches Logic with the required `--useExistingGraph` and
 `--graphPort` arguments. In Logic 2 select the Demo Logic Pro 16 device as the
 session device.
 
-To decode sensor traffic, first add Logic 2's built-in I2C or SPI analyzer,
-then add the matching `QMI8660`, `QMI8658A`, or `QMA6100P` HLA on top of it.
-QMI8660 and QMI8658A default to I2C addresses `0x6A`/`0x6B`; QMA6100P defaults
-to `0x12`/`0x13`. All three SPI protocols use bit 7 as the read flag, and using
-the Enable/CS channel gives exact transaction boundaries. Each decoder tracks
-its configured full scales and converts data/FIFO samples to physical units.
+The Bridge does not bundle or install Logic 2 extensions and does not read or
+write Logic 2's extension configuration. QST sensor analyzers are available
+from the independent
+[QST Sensor Decoders](https://github.com/listentodella/qst-sensor-decoders)
+repository.
 
 Automatic port mode asks macOS for a free loopback TCP port, then passes the
 actual value to Logic 2. The port is not fixed by Logic. In fixed mode the

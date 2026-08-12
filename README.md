@@ -27,11 +27,6 @@ an experimental candidate or unsupported. See the
 automatic analysis cannot produce a unique candidate or before promoting a
 candidate to verified support.
 
-When the launcher starts Logic 2, it also installs or refreshes three separate
-High Level Analyzer extensions: `QMI8660`, `QMI8658A`, and `QMA6100P`. Attach
-the matching HLA to Logic 2's built-in I2C or SPI analyzer to decode register
-names, fields, FIFO status, and physical sensor samples.
-
 ## Development checks
 
 ```sh

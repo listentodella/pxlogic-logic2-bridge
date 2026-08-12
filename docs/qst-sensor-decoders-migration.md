@@ -11,12 +11,10 @@ three independent entries in the Logic 2 analyzer menu:
 - `QMI8658A`
 - `QMA6100P`
 
-The Bridge repository keeps its existing copies under
-`tools/logic2-bridge/extensions/` for compatibility with already-published
-Bridge bundles. New analyzer fixes and releases should be made in the
-independent repository first. The copies in this repository should only be
-updated when a Bridge release intentionally needs to vendor a newer analyzer
-revision.
+The Bridge no longer keeps a bundled copy, installs the analyzers, or updates
+Logic 2's extension configuration. New analyzer fixes and releases belong only
+in the independent repository. Previously published Bridge versions are not
+changed by this source migration.
 
 The independent package is intentionally one repository/package rather than
 three repositories: it shares the I2C/SPI transaction assembly and display

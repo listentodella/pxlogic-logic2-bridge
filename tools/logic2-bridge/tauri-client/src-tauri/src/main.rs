@@ -30,47 +30,6 @@ const DEFAULT_PXLOGIC_THRESHOLD_VOLTS: f64 = 1.8;
 const MAX_PXLOGIC_THRESHOLD_VOLTS: f64 = 6.668;
 const OFFLINE_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(15);
 
-struct DecoderExtension {
-    directory: &'static str,
-    label: &'static str,
-    files: &'static [&'static str],
-}
-
-const DECODER_EXTENSIONS: &[DecoderExtension] = &[
-    DecoderExtension {
-        directory: "qmi8660",
-        label: "QMI8660",
-        files: &[
-            "extension.json",
-            "HighLevelAnalyzer.py",
-            "qmi8660_decode.py",
-            "qmi8660_registers.json",
-        ],
-    },
-    DecoderExtension {
-        directory: "qmi8658",
-        label: "QMI8658A",
-        files: &[
-            "extension.json",
-            "HighLevelAnalyzer.py",
-            "qmi8658_decode.py",
-            "qmi8658_registers.json",
-            "qst_hla_common.py",
-        ],
-    },
-    DecoderExtension {
-        directory: "qma6100p",
-        label: "QMA6100P",
-        files: &[
-            "extension.json",
-            "HighLevelAnalyzer.py",
-            "qma6100p_decode.py",
-            "qma6100p_registers.json",
-            "qst_hla_common.py",
-        ],
-    },
-];
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ClientSettings {
@@ -388,194 +347,6 @@ fn store_settings(app: &AppHandle, settings: ClientSettings) -> Result<ClientSet
         .map_err(|error| format!("无法写入配置: {error}"))?;
     fs::rename(&temporary, &path).map_err(|error| format!("无法保存配置: {error}"))?;
     Ok(settings)
-}
-
-#[cfg(target_os = "macos")]
-fn logic_config_path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or_else(|| "无法确定用户目录".to_string())?;
-    Ok(PathBuf::from(home).join("Library/Application Support/Logic/config.json"))
-}
-
-#[cfg(target_os = "windows")]
-fn logic_config_path() -> Result<PathBuf, String> {
-    let app_data =
-        std::env::var_os("APPDATA").ok_or_else(|| "无法确定 APPDATA 目录".to_string())?;
-    Ok(PathBuf::from(app_data).join("Logic/config.json"))
-}
-
-#[cfg(target_os = "linux")]
-fn logic_config_path() -> Result<PathBuf, String> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .ok_or_else(|| "无法确定 Linux 配置目录".to_string())?;
-    Ok(config.join("Logic/config.json"))
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn logic_config_path() -> Result<PathBuf, String> {
-    Err("当前平台不支持自动安装 Logic 2 扩展".to_string())
-}
-
-fn normalized_extension_path(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    if cfg!(target_os = "windows") {
-        normalized.to_lowercase()
-    } else {
-        normalized
-    }
-}
-
-fn update_decoder_extension_config(
-    config: &mut serde_json::Value,
-    directory: &str,
-    manifest_path: &Path,
-) -> Result<bool, String> {
-    let root = config
-        .as_object_mut()
-        .ok_or_else(|| "Logic config.json 顶层不是 JSON 对象".to_string())?;
-    let installed = root
-        .entry("installedExtensions")
-        .or_insert_with(|| serde_json::json!({ "version": 2, "extensions": [] }));
-    let installed = installed
-        .as_object_mut()
-        .ok_or_else(|| "Logic installedExtensions 配置无效".to_string())?;
-    let mut changed = installed.get("version").and_then(serde_json::Value::as_u64) != Some(2);
-    installed.insert("version".to_string(), serde_json::json!(2));
-    let extensions = installed
-        .entry("extensions")
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .ok_or_else(|| "Logic installedExtensions.extensions 配置无效".to_string())?;
-
-    let desired = manifest_path.to_string_lossy().into_owned();
-    let desired_normalized = normalized_extension_path(&desired);
-    let extension_suffix = format!("/extensions/{directory}/extension.json");
-    let mut next = Vec::with_capacity(extensions.len() + 1);
-    let mut found = false;
-    for extension in extensions.iter() {
-        let stored_path = extension
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let stored_normalized = normalized_extension_path(stored_path);
-        let belongs_to_bridge = stored_normalized.ends_with(&extension_suffix);
-        if !belongs_to_bridge {
-            next.push(extension.clone());
-            continue;
-        }
-        if found {
-            changed = true;
-            continue;
-        }
-        found = true;
-        let mut replacement = extension.clone();
-        let object = replacement
-            .as_object_mut()
-            .ok_or_else(|| format!("{directory} 扩展配置项不是 JSON 对象"))?;
-        if stored_normalized != desired_normalized {
-            object.insert("path".to_string(), serde_json::json!(desired.clone()));
-            changed = true;
-        }
-        if object.get("type").and_then(serde_json::Value::as_str) != Some("Local") {
-            object.insert("type".to_string(), serde_json::json!("Local"));
-            changed = true;
-        }
-        if object.get("isFromWeb").and_then(serde_json::Value::as_bool) != Some(false) {
-            object.insert("isFromWeb".to_string(), serde_json::json!(false));
-            changed = true;
-        }
-        if !object.contains_key("isDisabled") {
-            object.insert("isDisabled".to_string(), serde_json::json!(false));
-            changed = true;
-        }
-        next.push(replacement);
-    }
-    if !found {
-        next.push(serde_json::json!({
-            "path": desired.clone(),
-            "isFromWeb": false,
-            "isDisabled": false,
-            "type": "Local"
-        }));
-        changed = true;
-    }
-    if changed {
-        *extensions = next;
-    }
-    Ok(changed)
-}
-
-fn install_decoder_extensions(app: &AppHandle) -> Result<String, String> {
-    let source_root = bridge_root(app)?.join("extensions");
-    let destination_root = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("无法确定扩展安装目录: {error}"))?
-        .join("extensions");
-    let mut manifest_paths = Vec::with_capacity(DECODER_EXTENSIONS.len());
-    for extension in DECODER_EXTENSIONS {
-        let source = source_root.join(extension.directory);
-        let destination = destination_root.join(extension.directory);
-        fs::create_dir_all(&destination)
-            .map_err(|error| format!("无法创建 {} 扩展目录: {error}", extension.label))?;
-        for name in extension.files {
-            let source_file = source.join(name);
-            if !source_file.is_file() {
-                return Err(format!(
-                    "{} 扩展资源不存在: {}",
-                    extension.label,
-                    source_file.display()
-                ));
-            }
-            fs::copy(&source_file, destination.join(name)).map_err(|error| {
-                format!("无法安装 {} 扩展文件 {name}: {error}", extension.label)
-            })?;
-        }
-        manifest_paths.push((extension.directory, destination.join("extension.json")));
-    }
-    let config_path = logic_config_path()?;
-    let mut config = if config_path.is_file() {
-        let contents = fs::read_to_string(&config_path)
-            .map_err(|error| format!("无法读取 {}: {error}", config_path.display()))?;
-        serde_json::from_str(&contents)
-            .map_err(|error| format!("Logic 配置 JSON 无效 {}: {error}", config_path.display()))?
-    } else {
-        serde_json::json!({})
-    };
-    let mut changed = false;
-    for (directory, manifest_path) in &manifest_paths {
-        changed |= update_decoder_extension_config(&mut config, directory, manifest_path)?;
-    }
-    if !changed {
-        return Ok("QMI8660、QMI8658A、QMA6100P 解码扩展已安装".to_string());
-    }
-    let parent = config_path
-        .parent()
-        .ok_or_else(|| format!("Logic 配置路径无父目录: {}", config_path.display()))?;
-    fs::create_dir_all(parent).map_err(|error| format!("无法创建 Logic 配置目录: {error}"))?;
-    if config_path.is_file() {
-        let backup = config_path.with_extension("json.pxlogic-backup");
-        if !backup.exists() {
-            fs::copy(&config_path, &backup)
-                .map_err(|error| format!("无法备份 Logic 配置: {error}"))?;
-        }
-    }
-    let contents = serde_json::to_string_pretty(&config)
-        .map_err(|error| format!("无法序列化 Logic 配置: {error}"))?;
-    let temporary = config_path.with_extension("json.pxlogic.tmp");
-    fs::write(&temporary, format!("{contents}\n"))
-        .map_err(|error| format!("无法写入 Logic 临时配置: {error}"))?;
-    #[cfg(target_os = "windows")]
-    {
-        fs::copy(&temporary, &config_path)
-            .map_err(|error| format!("无法更新 Logic 配置: {error}"))?;
-        let _ = fs::remove_file(&temporary);
-    }
-    #[cfg(not(target_os = "windows"))]
-    fs::rename(&temporary, &config_path)
-        .map_err(|error| format!("无法更新 Logic 配置: {error}"))?;
-    Ok("已安装 QMI8660、QMI8658A、QMA6100P I2C/SPI 解码扩展".to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -1742,20 +1513,6 @@ fn validate_bridge_payload(app: &AppHandle) -> Result<BridgePayload, String> {
         root.join("lib/websocket-proxy.cjs"),
         root.join("lib/windows-hook-locator.cjs"),
         root.join("compatibility/profiles.json"),
-        root.join("extensions/qmi8660/extension.json"),
-        root.join("extensions/qmi8660/HighLevelAnalyzer.py"),
-        root.join("extensions/qmi8660/qmi8660_decode.py"),
-        root.join("extensions/qmi8660/qmi8660_registers.json"),
-        root.join("extensions/qmi8658/extension.json"),
-        root.join("extensions/qmi8658/HighLevelAnalyzer.py"),
-        root.join("extensions/qmi8658/qmi8658_decode.py"),
-        root.join("extensions/qmi8658/qmi8658_registers.json"),
-        root.join("extensions/qmi8658/qst_hla_common.py"),
-        root.join("extensions/qma6100p/extension.json"),
-        root.join("extensions/qma6100p/HighLevelAnalyzer.py"),
-        root.join("extensions/qma6100p/qma6100p_decode.py"),
-        root.join("extensions/qma6100p/qma6100p_registers.json"),
-        root.join("extensions/qma6100p/qst_hla_common.py"),
         native_host,
         helper.clone(),
         bitstreams.join("hspi_ddr.bin"),
@@ -2264,7 +2021,6 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
     settings.pxlogic_device_id = selected_device_id;
     settings = store_settings(app, settings)?;
     let payload = validate_bridge_payload(app)?;
-    let extension_status = install_decoder_extensions(app)?;
     let executable = logic_executable(&app_path);
     let runtime_app_path = app_path.to_string_lossy().into_owned();
     let helper = payload.helper.to_string_lossy().into_owned();
@@ -2351,7 +2107,6 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
             inspection.version.unwrap_or_default()
         ),
     );
-    append_log(app, "client", &extension_status);
     read_process_lines(app.clone(), "bridge", stdout);
     read_process_lines(app.clone(), "runtime", stderr);
     monitor_bridge(app.clone(), token);
@@ -2602,73 +2357,6 @@ mod tests {
         let settings = settings.normalized();
         assert_eq!(settings.pxlogic_threshold_volts, 1.2);
         assert!(settings.temporary_comparator_threshold_volts.is_none());
-    }
-
-    #[test]
-    fn installs_decoder_extensions_without_touching_other_extensions() {
-        let mut config = serde_json::json!({
-            "installedExtensions": {
-                "version": 2,
-                "extensions": [
-                    { "path": "/tmp/another/extension.json", "type": "Local", "isDisabled": true }
-                ]
-            }
-        });
-        assert!(update_decoder_extension_config(
-            &mut config,
-            "qmi8660",
-            Path::new("/Applications/PXLogic Bridge.app/Contents/Resources/tools/logic2-bridge/extensions/qmi8660/extension.json")
-        )
-        .unwrap());
-        let extensions = config["installedExtensions"]["extensions"]
-            .as_array()
-            .unwrap();
-        assert_eq!(extensions.len(), 2);
-        assert_eq!(extensions[0]["path"], "/tmp/another/extension.json");
-        assert_eq!(extensions[0]["isDisabled"], true);
-        assert_eq!(extensions[1]["type"], "Local");
-    }
-
-    #[test]
-    fn refreshes_stale_qmi8660_path_and_preserves_disabled_state() {
-        let mut config = serde_json::json!({
-            "installedExtensions": {
-                "version": 2,
-                "extensions": [
-                    {
-                        "path": "/old/tools/logic2-bridge/extensions/qmi8660/extension.json",
-                        "type": "Local",
-                        "isFromWeb": true,
-                        "isDisabled": true
-                    }
-                ]
-            }
-        });
-        let desired = Path::new("/new/tools/logic2-bridge/extensions/qmi8660/extension.json");
-        assert!(update_decoder_extension_config(&mut config, "qmi8660", desired).unwrap());
-        let extension = &config["installedExtensions"]["extensions"][0];
-        assert_eq!(extension["path"], desired.to_string_lossy().as_ref());
-        assert_eq!(extension["isFromWeb"], false);
-        assert_eq!(extension["isDisabled"], true);
-        assert!(!update_decoder_extension_config(&mut config, "qmi8660", desired).unwrap());
-    }
-
-    #[test]
-    fn installs_three_decoder_manifests_as_independent_extensions() {
-        let mut config = serde_json::json!({});
-        for directory in ["qmi8660", "qmi8658", "qma6100p"] {
-            let path = PathBuf::from(format!(
-                "/opt/pxlogic/extensions/{directory}/extension.json"
-            ));
-            assert!(update_decoder_extension_config(&mut config, directory, &path).unwrap());
-        }
-        let extensions = config["installedExtensions"]["extensions"]
-            .as_array()
-            .unwrap();
-        assert_eq!(extensions.len(), 3);
-        assert!(extensions
-            .iter()
-            .all(|extension| extension["type"] == "Local"));
     }
 
     #[test]
