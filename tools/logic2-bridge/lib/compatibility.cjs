@@ -361,12 +361,16 @@ function readLogicVersionFromInstallation(installationPath) {
   return match ? match[1] : null;
 }
 
-function loadCompatibilityProfiles(profilesPath = DEFAULT_PROFILES_PATH) {
+function loadCompatibilityManifest(profilesPath = DEFAULT_PROFILES_PATH) {
   const manifest = JSON.parse(fs.readFileSync(profilesPath, 'utf8'));
   if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.profiles)) {
     throw new Error(`Unsupported compatibility profile manifest: ${profilesPath}`);
   }
-  return manifest.profiles;
+  return manifest;
+}
+
+function loadCompatibilityProfiles(profilesPath = DEFAULT_PROFILES_PATH) {
+  return loadCompatibilityManifest(profilesPath).profiles;
 }
 
 function matchCompatibilityProfile({
@@ -400,6 +404,7 @@ module.exports = {
   findGraphServerBinary,
   inspectGraphBinary,
   readLogicVersionFromInstallation,
+  loadCompatibilityManifest,
   loadCompatibilityProfiles,
   matchCompatibilityProfile,
   parseBinaryIdentity,

@@ -3,10 +3,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
 const net = require('node:net');
+const os = require('node:os');
+const path = require('node:path');
 const { PassThrough } = require('node:stream');
 const {
   logicProcessEnvironment,
+  loadRuntimeCompatibilityProfiles,
   macMaximizeScript,
   nativeGraphStartupTimeoutMs,
   nativeHookArguments,
@@ -35,17 +39,17 @@ test('accepts a preferred public port', () => {
   assert.throws(() => parseArguments(['--port', '65536']), /Invalid port/);
 });
 
-test('accepts only PXView hardware threshold levels', () => {
+test('accepts an explicit PXLogic voltage threshold', () => {
   assert.equal(
-    parseArguments(['--hardware-threshold-volts', '1.8']).hardwareThresholdVolts,
-    1.8,
+    parseArguments(['--hardware-threshold-volts', '1.12']).hardwareThresholdVolts,
+    1.12,
   );
   assert.equal(
-    parseArguments(['--hardware-threshold-volts', '5.0']).hardwareThresholdVolts,
-    5.0,
+    parseArguments(['--hardware-threshold-volts', '6.668']).hardwareThresholdVolts,
+    6.668,
   );
   assert.throws(
-    () => parseArguments(['--hardware-threshold-volts', '1.2']),
+    () => parseArguments(['--hardware-threshold-volts', '6.669']),
     /Invalid PXLogic hardware threshold/,
   );
 });
@@ -53,6 +57,26 @@ test('accepts only PXView hardware threshold levels', () => {
 test('requires an explicit opt-in for pending live-validation profiles', () => {
   assert.equal(parseArguments(['--allow-pending-profile']).allowPendingProfile, true);
   assert.equal(parseArguments([]).allowPendingProfile, false);
+});
+
+test('accepts an offline compatibility profile manifest', () => {
+  const options = parseArguments(['--compatibility-profiles', './local-profiles.json']);
+  assert.equal(options.compatibilityProfiles, path.resolve('./local-profiles.json'));
+});
+
+test('rejects stale local profiles before the bridge runtime loads them', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'logic2-stale-profile-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const profilesPath = path.join(directory, 'compatibility-analysis.json');
+  fs.writeFileSync(profilesPath, JSON.stringify({
+    schemaVersion: 1,
+    analyzerVersion: 0,
+    profiles: [],
+  }));
+  assert.throws(
+    () => loadRuntimeCompatibilityProfiles(profilesPath),
+    /analyzer version 0 does not match 2/,
+  );
 });
 
 test('uses exact profile metadata only when installation metadata is unavailable', () => {

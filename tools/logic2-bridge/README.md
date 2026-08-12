@@ -11,19 +11,20 @@ the user's official Logic installation instead of packaging a second runtime.
 
 ## Support boundary
 
-The native callback hook is verified for the official macOS arm64 Logic `2.4.46`
-GraphServer. Windows x64 `2.4.46` is now an explicit experimental validation
-target: its PE CodeView identity, callback RVA, prologue, and Microsoft x64
-aggregate-argument layout are checked, but it must still complete a real PXLogic
-capture before the profile is promoted to `verified`. An unknown build is
-refused instead of being patched optimistically.
+The native callback hook and live PXLogic capture are verified for the official
+macOS arm64 Logic `2.4.36`, `2.4.45`, and `2.4.46` GraphServers. Windows x64
+`2.4.46` is an explicit experimental validation target: its PE CodeView
+identity, callback RVA, prologue, and Microsoft x64 aggregate-argument layout
+are checked, but it must still complete a real PXLogic capture before the
+profile is promoted to `verified`. Unknown builds are analyzed offline and may
+run only when the evidence converges to one exact experimental candidate.
 
 | Layer | macOS arm64 | macOS x64 | Windows x64 | Linux x64 |
 | --- | --- | --- | --- | --- |
 | WebSocket proxy and data conversion | Tested | Tested in CI | Tested in CI | Tested in CI |
 | PXLogic `usb_smoke` helper | Supported by the PXLogic workspace | Supported by the PXLogic workspace | Supported by the PXLogic workspace | Supported by the PXLogic workspace |
-| Logic 2.4.46 GraphServer identity | UUID + SHA verified | Profile pending | CodeView + SHA verified | Build ID + SHA recorded |
-| Logic 2.4.46 GraphServer injection | Verified | Not implemented | Experimental host, pending capture | Reverse-engineered, pending capture |
+| GraphServer identity | Logic 2.4.36/2.4.45/2.4.46 UUID + SHA verified | Profile pending | Logic 2.4.46 CodeView + SHA verified | Logic 2.4.46 Build ID + SHA recorded |
+| GraphServer injection | Logic 2.4.36/2.4.45/2.4.46 verified | Not implemented | Experimental host, pending capture | Reverse-engineered, pending capture |
 | Complete live bridge | **Supported** | Not supported | Validation build | Not supported |
 
 Building the portable JavaScript and PXLogic USB layers on another operating
@@ -35,7 +36,9 @@ those details and a real capture have been verified.
 ## Prerequisites
 
 - macOS arm64
-- The official Logic app, version `2.4.46`
+- An official macOS arm64 Logic app. Versions `2.4.36`, `2.4.45`, and `2.4.46`
+  have built-in verified profiles; other exact builds use the offline
+  experimental-candidate path when structural analysis succeeds.
 
 The packaged desktop client does not require Node.js, npm, Rust, Cargo, or the
 Xcode Command Line Tools on the user's machine. Those tools are build-time
@@ -58,9 +61,36 @@ identity, callback offset, and prologue as runtime data. The outer Logic version
 is retained as metadata but is not a hard match: if a later Logic release ships
 the byte-for-byte identical GraphServer, the existing profile can be reused.
 A dynamically extracted UUID/Build ID/CodeView identity alone never authorizes
-patching. A changed binary still requires a new callback offset, prologue, and
-ABI review; the Windows package exposes this only through the explicit
-experimental validation path.
+patching. A changed binary still requires a new callback offset and prologue,
+and remains experimental until its ABI and real capture behavior are reviewed.
+
+For an unknown exact fingerprint, the desktop client runs a read-only analyzer
+with Logic 2's embedded Node runtime. On macOS arm64 it resolves the
+`OnDataBuffer` and source-file diagnostic string references through ARM64
+`ADRP + ADD` instructions, then uses `LC_FUNCTION_STARTS` to recover the unique
+function entry. It rejects an entry whose 16-byte patch window contains a
+PC-relative instruction and records buffer-register/size-load patterns as ABI
+confidence evidence. A known long signature is only a fallback. Windows x64
+requires the method name and signature references to converge through the PE
+runtime-function table and the entry bytes to match a maintained
+trampoline-safe prologue. Linux x64 currently requires a unique locator
+signature from a known profile. Success is stored as a `candidate`; ambiguity
+or unsafe entry code is stored as `unsupported`. The built-in manifest always
+takes precedence over local data.
+
+The local result is stored in the platform application configuration directory
+as `compatibility-analysis.json`. Records are keyed by platform, architecture,
+native identity, and SHA-256, so updating Logic does not reuse a result for a
+different GraphServer. Candidate and failure records are tied to the analyzer
+version and are automatically retried after the analyzer changes. The Logic
+section's `重新分析` action forces a retry with the current analyzer. No profile
+lookup, telemetry, or other network request is made.
+
+An automatic candidate is runnable through the UI's explicitly labeled
+experimental path, but it is not equivalent to verified support. Use the
+[manual GraphServer profile procedure](../../docs/graphserver-profile-manual.md)
+to resolve automatic failures, inspect ABI/prologue safety, validate real
+hardware capture, and promote a profile.
 
 ## Continuous integration
 
@@ -123,14 +153,17 @@ packaged firmware/FPGA resource status, and it supports selecting a specific
 device when more than one is connected. The selected device is checked again
 immediately before the Bridge starts.
 
-PXLogic hardware levels use the same nominal choices exposed by PXView: 1.8 V,
-2.5 V, 3.3 V, and 5.0 V. The selected level is owned by the Bridge and converted
-by the PXLogic backend to the physical comparator threshold (one half of the
-nominal level). Logic 2 remains authoritative for enabled channels, sample
-rate, capture control, triggers, software glitch filters, and analyzers.
+The PXLogic panel accepts the PXView-compatible voltage threshold directly from
+`0.000 V` through `6.668 V` (default `1.800 V`). The value is passed unchanged
+to the PXLogic helper; the driver's internal `0.5` factor is part of the device
+DAC formula and is not a second user-facing conversion. The Bridge-owned value
+is independent from Logic 2's nominal I/O-level selector. Logic 2 remains
+authoritative for enabled channels, sample rate, capture control, triggers,
+software glitch filters, and analyzers.
 
-Click `Start Logic 2` after an installation matching a verified compatibility
-profile is shown.
+Click `Start Logic 2` after a verified profile is shown. For a locally analyzed
+candidate, review the automatic-candidate status and use `启动实验验证`; an
+unsupported result is not injected.
 Before launching Logic, the client copies its bundled QMI8660, QMI8658A, and
 QMA6100P High Level Analyzers to separate stable per-user data directories and
 registers each manifest as a Logic 2 local extension. Existing extensions are
@@ -152,10 +185,11 @@ actual value to Logic 2. The port is not fixed by Logic. In fixed mode the
 selected value is preferred; if it is occupied, the bridge falls back to an
 available port and reports the actual endpoint in the client.
 
-CI builds are unsigned unless Apple signing credentials are provided. For an
-unsigned downloaded build, macOS may require the first launch through Finder's
-`Open` context-menu action. Public distribution without that prompt requires
-Developer ID signing and Apple notarization.
+CI builds are ad-hoc signed so the application bundle and packaged resources
+can be checked for integrity, but they are not Developer ID signed or notarized.
+macOS may require the first launch through Finder's `Open` context-menu action.
+Public distribution without that prompt requires Developer ID signing and
+Apple notarization.
 
 ## Command-line development
 
@@ -176,6 +210,10 @@ When capture starts, the bridge follows the channel, sample rate, and voltage
 settings sent by Logic 2 and starts PXLogic automatically. Use `--port 12472`
 to request a fixed port or `--port auto` explicitly.
 
+PXLogic's supported rates include the Logic Pro 16 `6.25 MHz` setting. It is
+generated exactly from the 100 MHz hardware divider (`mode=7`, `div=15`), so the
+GraphServer time base and physical sample clock remain identical.
+
 For the local app used during development:
 
 ```sh
@@ -190,6 +228,13 @@ selection is authoritative after the session sends `EnableChannels`.
 
 ## Data and control semantics
 
+- The Bridge prepares the PXLogic FPGA once before Logic 2 starts. Every Logic
+  Start/Stop after that uses `--skip-prepare`, so starting a capture does not
+  upload reset/main bitstreams or cycle the FPGA I/O banks.
+- A capture explicitly disables PXLogic PWM0/PWM1, External Trigger, Trigger
+  Out, and hardware trigger masks before arming the input sampler. A failed
+  helper locks capture for the remainder of the Bridge session instead of
+  automatically reconfiguring the FPGA; restart the Bridge to recover.
 - PXLogic always receives `--glitch-filter` (one hardware sample period).
 - Logic 2's Glitch Filter remains GraphServer software post-processing.
 - Logic 2 digital triggers remain GraphServer real-time processing. Trigger
@@ -198,6 +243,23 @@ selection is authoritative after the session sends `EnableChannels`.
   before they enter the native GraphServer callback.
 - The bridge uses `stream` mode and continuously forwards samples; GraphServer
   decides trigger time and Logic 2 decides when the post-trigger interval ends.
+
+The hardware threshold is the actual comparator decision voltage, not the
+target circuit's nominal high level. Do not derive it from `VCC` alone: probe
+loading, ground quality, ringing, edge rate, and board-level noise determine
+which threshold produces correct digital decisions. Keep the user-selected
+Bridge value authoritative and validate it against a known protocol result.
+For the current 3.3 V STM32 SPI fixture, `2.2 V` is verified: after the D4
+interrupt rises, the following four-byte SPI read contains the expected
+`0x43`. A `1.5 V` capture showed activity but decoded the transaction
+incorrectly, so edge counts alone are not an acceptable threshold test.
+
+The one-time FPGA prepare can still produce a hardware-front-end transient. If
+the target bus is affected when the Bridge itself starts, stop testing and
+verify probe grounding and input impedance with an oscilloscope. Repeated Logic
+Start operations must not log `uploading reset bitstream` or
+`uploading main bitstream`; those lines are only valid once during Bridge
+startup.
 
 ## Diagnostics
 

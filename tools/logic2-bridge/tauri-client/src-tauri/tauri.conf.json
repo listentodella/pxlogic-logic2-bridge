@@ -38,6 +38,7 @@
       "../../index.cjs": "tools/logic2-bridge/index.cjs",
       "../../lib": "tools/logic2-bridge/lib",
       "../../compatibility": "tools/logic2-bridge/compatibility",
+      "../../../../docs/graphserver-profile-manual.md": "docs/graphserver-profile-manual.md",
       "../../extensions/qmi8660/extension.json": "tools/logic2-bridge/extensions/qmi8660/extension.json",
       "../../extensions/qmi8660/HighLevelAnalyzer.py": "tools/logic2-bridge/extensions/qmi8660/HighLevelAnalyzer.py",
       "../../extensions/qmi8660/qmi8660_decode.py": "tools/logic2-bridge/extensions/qmi8660/qmi8660_decode.py",

@@ -31,6 +31,7 @@ pub const REG_EXT_TRIGGER_MODE: u32 = 15 << 2;
 pub const REG_PWM0_ENABLE: u32 = 16 << 2;
 pub const REG_PWM0_PERIOD: u32 = 17 << 2;
 pub const REG_PWM0_HIGH: u32 = 18 << 2;
+pub const REG_PWM1_ENABLE: u32 = 19 << 2;
 pub const REG_TRIGGER_OUT_ENABLE: u32 = 22 << 2;
 pub const REG_THRESHOLD_PWM_MAX: u32 = 2 << 1;
 pub const REG_THRESHOLD_VALUE: u32 = 2 << 2;

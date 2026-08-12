@@ -40,6 +40,7 @@ struct Options {
     list_only: bool,
     list_json: bool,
     prepare_only: bool,
+    skip_prepare: bool,
     flash_mcu: bool,
     output: Option<PathBuf>,
     trigger_channel: Option<u8>,
@@ -84,6 +85,7 @@ impl Default for Options {
             list_only: false,
             list_json: false,
             prepare_only: false,
+            skip_prepare: false,
             flash_mcu: false,
             output: None,
             trigger_channel: None,
@@ -177,10 +179,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let bitstreams = RusbBackend::load_bitstreams()?
-        .ok_or("missing FPGA bitstreams; expected resources/bitstreams/*.bin")?;
-
-    backend.prepare_device_with_trace(device_id, Some(&bitstreams), &mut trace)?;
+    if options.skip_prepare {
+        println!("[prepare:info] reusing FPGA state prepared by the Bridge session");
+    } else {
+        let bitstreams = RusbBackend::load_bitstreams()?
+            .ok_or("missing FPGA bitstreams; expected resources/bitstreams/*.bin")?;
+        backend.prepare_device_with_trace(device_id, Some(&bitstreams), &mut trace)?;
+    }
     if options.pwm_configure || options.pwm_only {
         let configuration = backend.configure_pwm0_with_trace(
             device_id,
@@ -594,6 +599,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--list-only" => options.list_only = true,
             "--list-json" => options.list_json = true,
             "--prepare-only" => options.prepare_only = true,
+            "--skip-prepare" => options.skip_prepare = true,
             "--flash-mcu" => options.flash_mcu = true,
             "--raw-cross" => options.decode_cross = false,
             "--decode-cross" => options.decode_cross = true,
@@ -604,6 +610,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             }
             other => return Err(format!("unknown argument: {other}").into()),
         }
+    }
+    if options.prepare_only && options.skip_prepare {
+        return Err("--prepare-only and --skip-prepare cannot be used together".into());
     }
     Ok(options)
 }
@@ -675,7 +684,7 @@ fn parse_enabled_channels(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "usb_smoke [--list-only|--list-json] [--prepare-only] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--trigger-high-mask mask] [--trigger-low-mask mask] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--live] [--live-cross-only] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
+        "usb_smoke [--list-only|--list-json] [--prepare-only|--skip-prepare] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--trigger-high-mask mask] [--trigger-low-mask mask] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--live] [--live-cross-only] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
     );
 }
 

@@ -27,7 +27,10 @@
             <h2>Logic 2</h2>
             <p id="logic-summary">正在检测安装...</p>
           </div>
-          <button id="rescan-button" class="secondary-button" type="button">重新检测</button>
+          <div class="heading-actions">
+            <button id="analyze-button" class="secondary-button" type="button">重新分析</button>
+            <button id="rescan-button" class="secondary-button" type="button">重新检测</button>
+          </div>
         </div>
 
         <label for="logic-path">应用路径</label>
@@ -60,13 +63,9 @@
             <select id="pxlogic-device"></select>
           </div>
           <div>
-            <label for="pxlogic-threshold">目标逻辑电平</label>
-            <select id="pxlogic-threshold">
-              <option value="1.8">1.8 V</option>
-              <option value="2.5">2.5 V</option>
-              <option value="3.3">3.3 V</option>
-              <option value="5">5.0 V</option>
-            </select>
+            <label for="pxlogic-threshold">电压判断阈值（V）</label>
+            <input id="pxlogic-threshold" type="number" min="0" max="6.668" step="0.01"
+              inputmode="decimal" value="1.80">
           </div>
         </div>
 
@@ -75,7 +74,7 @@
           <div><span>USB</span><strong id="pxlogic-usb-speed">--</strong></div>
           <div><span>固件</span><strong id="pxlogic-firmware">--</strong></div>
           <div><span>FPGA</span><strong id="pxlogic-bitstream">--</strong></div>
-          <div><span>比较阈值</span><strong id="pxlogic-comparator">0.90 V</strong></div>
+          <div><span>硬件阈值</span><strong id="pxlogic-threshold-value">1.800 V</strong></div>
         </div>
       </section>
 
@@ -128,6 +127,15 @@
       <p id="footer-message">使用所选 Logic 2 的内置 Node 运行 bridge</p>
       <button id="start-button" class="primary-button" type="button">启动 Logic 2</button>
     </footer>
+
+    <dialog id="compatibility-warning" class="warning-dialog">
+      <h2>GraphServer 无法自动适配</h2>
+      <p id="compatibility-warning-message"></p>
+      <div class="dialog-actions">
+        <button id="open-manual-button" class="secondary-button" type="button">打开手工指南</button>
+        <button id="close-warning-button" class="primary-button" type="button">关闭</button>
+      </div>
+    </dialog>
 
     <script src="app.js"></script>
   </body>

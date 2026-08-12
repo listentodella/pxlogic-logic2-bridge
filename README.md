@@ -9,9 +9,23 @@ the helper. It does not contain or modify Saleae Logic itself.
 
 The desktop launcher detects connected PXLogic devices, reports their model,
 serial number, and USB link speed, validates its packaged firmware/FPGA
-resources, and exposes PXView-compatible 1.8 V, 2.5 V, 3.3 V, and 5.0 V
-hardware-level choices. Logic 2 remains the source of truth for channels,
-sample rate, capture control, triggers, filters, and analyzers.
+resources, and exposes a manually entered PXView-compatible hardware voltage
+threshold. Logic 2 remains the source of truth for channels, sample rate,
+capture control, triggers, filters, and analyzers.
+
+PXLogic FPGA setup is performed once per Bridge launch. Logic 2 Start/Stop
+operations reuse that prepared state, keep PXLogic hardware outputs disabled,
+and only arm or stop the input sampler. The voltage field is a comparator
+threshold. It must be selected for the actual probe, target, and signal quality;
+the target's nominal logic voltage alone is not enough to derive a reliable
+threshold.
+
+GraphServer compatibility is resolved entirely offline. Exact built-in profiles
+are used directly; an unknown binary is analyzed locally and recorded as either
+an experimental candidate or unsupported. See the
+[manual GraphServer profile procedure](docs/graphserver-profile-manual.md) when
+automatic analysis cannot produce a unique candidate or before promoting a
+candidate to verified support.
 
 When the launcher starts Logic 2, it also installs or refreshes three separate
 High Level Analyzer extensions: `QMI8660`, `QMI8658A`, and `QMA6100P`. Attach

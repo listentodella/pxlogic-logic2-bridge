@@ -23,7 +23,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   pxlogicDeviceId: '',
   pxlogicThresholdVolts: 1.8,
 });
-const PXVIEW_THRESHOLD_VOLTAGES = [1.8, 2.5, 3.3, 5.0];
+const MAX_PXLOGIC_THRESHOLD_VOLTS = 6.668;
 
 let mainWindow;
 let tray;
@@ -127,7 +127,13 @@ function normalizeSettings(value = {}) {
   const portMode = value.portMode === 'fixed' ? 'fixed' : 'auto';
   const preferredPort = Number(value.preferredPort);
   const screenQuadrant = Number(value.screenQuadrant);
-  const pxlogicThresholdVolts = Number(value.pxlogicThresholdVolts);
+  const explicitThreshold = Number(value.pxlogicThresholdVolts);
+  const temporaryComparatorField = Number(value.pxlogicComparatorThresholdVolts);
+  const pxlogicThresholdVolts = Number.isFinite(explicitThreshold)
+    ? explicitThreshold
+    : Number.isFinite(temporaryComparatorField)
+      ? temporaryComparatorField
+      : DEFAULT_SETTINGS.pxlogicThresholdVolts;
   return {
     logicAppPath: typeof value.logicAppPath === 'string' ? value.logicAppPath.trim() : '',
     portMode,
@@ -141,7 +147,8 @@ function normalizeSettings(value = {}) {
     pxlogicDeviceId: typeof value.pxlogicDeviceId === 'string'
       ? value.pxlogicDeviceId.trim()
       : '',
-    pxlogicThresholdVolts: PXVIEW_THRESHOLD_VOLTAGES.includes(pxlogicThresholdVolts)
+    pxlogicThresholdVolts: pxlogicThresholdVolts >= 0 &&
+      pxlogicThresholdVolts <= MAX_PXLOGIC_THRESHOLD_VOLTS
       ? pxlogicThresholdVolts
       : DEFAULT_SETTINGS.pxlogicThresholdVolts,
   };

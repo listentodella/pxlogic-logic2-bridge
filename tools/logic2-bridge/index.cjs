@@ -9,9 +9,11 @@ const { spawn, spawnSync } = require('node:child_process');
 const {
   PxlogicCaptureController,
   createLineReader,
+  preparePxlogicDevice,
 } = require('./lib/capture-controller.cjs');
 const {
   findGraphServerBinary,
+  loadCompatibilityManifest,
   matchCompatibilityProfile,
   readLogicVersionFromInstallation,
 } = require('./lib/compatibility.cjs');
@@ -20,7 +22,6 @@ const { startWebSocketProxy } = require('./lib/websocket-proxy.cjs');
 
 const bridgeRoot = __dirname;
 const pxlogicRoot = path.resolve(bridgeRoot, '..', '..');
-const PXVIEW_THRESHOLD_VOLTAGES = [1.8, 2.5, 3.3, 5.0];
 
 function parseArguments(argv) {
   const result = {
@@ -49,6 +50,7 @@ function parseArguments(argv) {
     maximizeWindow: true,
     remoteDebuggingPort: undefined,
     allowPendingProfile: false,
+    compatibilityProfiles: process.env.PXLOGIC_COMPATIBILITY_PROFILES,
     dryRun: false,
   };
 
@@ -81,6 +83,9 @@ function parseArguments(argv) {
     else if (argument === '--remote-debugging-port') {
       result.remoteDebuggingPort = Number(argv[++index]);
     } else if (argument === '--allow-pending-profile') result.allowPendingProfile = true;
+    else if (argument === '--compatibility-profiles') {
+      result.compatibilityProfiles = path.resolve(argv[++index]);
+    }
     else if (argument === '--dry-run') result.dryRun = true;
     else if (argument === '--help' || argument === '-h') result.help = true;
     else throw new Error(`Unknown argument: ${argument}`);
@@ -100,10 +105,10 @@ function parseArguments(argv) {
     throw new Error(`Invalid threshold voltage: ${result.thresholdVolts}`);
   }
   if (result.hardwareThresholdVolts !== undefined &&
-      !PXVIEW_THRESHOLD_VOLTAGES.includes(result.hardwareThresholdVolts)) {
+      (!Number.isFinite(result.hardwareThresholdVolts) ||
+       result.hardwareThresholdVolts < 0 || result.hardwareThresholdVolts > 6.668)) {
     throw new Error(
-      `Invalid PXLogic hardware threshold: ${result.hardwareThresholdVolts}; ` +
-      `expected ${PXVIEW_THRESHOLD_VOLTAGES.join(', ')}`,
+      `Invalid PXLogic hardware threshold: ${result.hardwareThresholdVolts}`,
     );
   }
   if (!Number.isInteger(result.captureWindowMs) || result.captureWindowMs < 10) {
@@ -138,13 +143,15 @@ Options:
   --sample-rate HZ           Initial sample rate (default: 25000000)
   --threshold-volts V        Initial nominal I/O level (default: 2.0)
   --hardware-threshold-volts V
-                             Fixed PXLogic I/O level: 1.8, 2.5, 3.3, or 5.0
+                             Fixed PXLogic voltage threshold: 0..6.668 V
   --capture-window-ms MS     PXLogic stream re-arm window (default: 1000)
   --scan-saleae-devices      Also let GraphServer scan physical Saleae devices
   --maximize-window          Maximize Logic after launch (default)
   --screen-quadrant N        Place Logic in screen quadrant 1-4 instead
   --remote-debugging-port N  Enable Chromium remote debugging for this Logic process
   --allow-pending-profile    Run an exact-match experimental profile for live validation
+  --compatibility-profiles FILE
+                             Add offline local candidate profiles from FILE
   --dry-run                  Validate paths, version, and native host build without launching
   --help                     Show this help
 
@@ -316,6 +323,24 @@ function resolveRuntimeVersion(detectedVersion, profile) {
   return 'unknown';
 }
 
+function loadRuntimeCompatibilityProfiles(localProfilesPath) {
+  const builtIn = loadCompatibilityManifest();
+  if (!Number.isSafeInteger(builtIn.analyzerVersion) || builtIn.analyzerVersion < 1) {
+    throw new Error('Built-in compatibility manifest has an invalid analyzer version');
+  }
+  if (!localProfilesPath) return builtIn.profiles;
+  const local = loadCompatibilityManifest(localProfilesPath);
+  if (local.analyzerVersion !== builtIn.analyzerVersion) {
+    throw new Error(
+      `Local compatibility profile analyzer version ${local.analyzerVersion ?? 'missing'} ` +
+      `does not match ${builtIn.analyzerVersion}`,
+    );
+  }
+  const localProfiles = local.profiles.filter(profile =>
+    ['candidate', 'locally-verified'].includes(profile.hook?.status));
+  return [...builtIn.profiles, ...localProfiles];
+}
+
 function resolveRuntime(options) {
   const appPath = resolveAppPath(options.appPath);
   let detectedVersion;
@@ -340,6 +365,7 @@ function resolveRuntime(options) {
     platform: process.platform,
     architecture: process.arch,
     graphPath: sharedLibrary,
+    profiles: loadRuntimeCompatibilityProfiles(options.compatibilityProfiles),
   });
   if (!compatibility.profile) {
     const identity = compatibility.fingerprint.identity || 'unknown';
@@ -357,8 +383,12 @@ function resolveRuntime(options) {
       `using exact GraphServer profile metadata (${version})`,
     );
   }
-  const pendingValidation =
-    compatibility.profile.hook.status === 'pending-live-validation';
+  const experimentalStatuses = new Set([
+    'pending-live-validation',
+    'candidate',
+    'locally-verified',
+  ]);
+  const pendingValidation = experimentalStatuses.has(compatibility.profile.hook.status);
   if (!compatibility.supported && !(options.allowPendingProfile && pendingValidation)) {
     throw new Error(
       `GraphServer profile ${compatibility.profile.id} is not live-validated: ` +
@@ -553,6 +583,11 @@ async function main() {
     return;
   }
 
+  // PXView prepares the FPGA when a device is opened, not on every capture.
+  // Keep the prepared state in the hardware for this Bridge process and make
+  // every later Start/Stop operation capture-only.
+  await preparePxlogicDevice(options);
+
   const stateRoot = process.platform === 'darwin'
     ? path.join(os.homedir(), 'Library', 'Application Support', 'PXLogic', 'logic2-bridge')
     : process.platform === 'win32'
@@ -671,6 +706,7 @@ async function main() {
 
 module.exports = {
   installedAppCandidates,
+  loadRuntimeCompatibilityProfiles,
   logicProcessEnvironment,
   macMaximizeScript,
   nativeGraphStartupTimeoutMs,

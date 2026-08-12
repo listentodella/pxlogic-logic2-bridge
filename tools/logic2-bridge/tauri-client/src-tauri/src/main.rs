@@ -26,7 +26,9 @@ use tauri_plugin_dialog::DialogExt;
 
 const MAX_LOG_LINES: usize = 500;
 const NODE_PROBE_MARKER: &str = "PXLOGIC_NODE_OK:";
-const PXVIEW_THRESHOLD_VOLTAGES: [f64; 4] = [1.8, 2.5, 3.3, 5.0];
+const DEFAULT_PXLOGIC_THRESHOLD_VOLTS: f64 = 1.8;
+const MAX_PXLOGIC_THRESHOLD_VOLTS: f64 = 6.668;
+const OFFLINE_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct DecoderExtension {
     directory: &'static str,
@@ -82,6 +84,8 @@ struct ClientSettings {
     pxlogic_device_id: String,
     #[serde(default = "default_pxlogic_threshold_volts")]
     pxlogic_threshold_volts: f64,
+    #[serde(default, rename = "pxlogicComparatorThresholdVolts", skip_serializing)]
+    temporary_comparator_threshold_volts: Option<f64>,
 }
 
 fn default_maximize_logic_window() -> bool {
@@ -89,7 +93,7 @@ fn default_maximize_logic_window() -> bool {
 }
 
 fn default_pxlogic_threshold_volts() -> f64 {
-    PXVIEW_THRESHOLD_VOLTAGES[0]
+    DEFAULT_PXLOGIC_THRESHOLD_VOLTS
 }
 
 impl Default for ClientSettings {
@@ -102,6 +106,7 @@ impl Default for ClientSettings {
             maximize_logic_window: true,
             pxlogic_device_id: String::new(),
             pxlogic_threshold_volts: default_pxlogic_threshold_volts(),
+            temporary_comparator_threshold_volts: None,
         }
     }
 }
@@ -116,7 +121,12 @@ impl ClientSettings {
             self.screen_quadrant = 3;
         }
         self.pxlogic_device_id = self.pxlogic_device_id.trim().to_string();
-        if !PXVIEW_THRESHOLD_VOLTAGES.contains(&self.pxlogic_threshold_volts) {
+        if let Some(temporary_threshold) = self.temporary_comparator_threshold_volts.take() {
+            self.pxlogic_threshold_volts = temporary_threshold;
+        }
+        if !self.pxlogic_threshold_volts.is_finite()
+            || !(0.0..=MAX_PXLOGIC_THRESHOLD_VOLTS).contains(&self.pxlogic_threshold_volts)
+        {
             self.pxlogic_threshold_volts = default_pxlogic_threshold_volts();
         }
         self
@@ -167,6 +177,8 @@ impl LogicInspection {
 #[serde(rename_all = "camelCase")]
 struct CompatibilityManifest {
     schema_version: u32,
+    #[serde(default)]
+    analyzer_version: Option<u32>,
     profiles: Vec<CompatibilityProfile>,
 }
 
@@ -192,6 +204,16 @@ struct CompatibilityGraph {
 struct CompatibilityHook {
     status: String,
     validation: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OfflineAnalysisResult {
+    status: String,
+    #[serde(default)]
+    cached: bool,
+    reason: String,
+    profile: Option<CompatibilityProfile>,
 }
 
 struct GraphInspection {
@@ -315,6 +337,13 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
         .app_config_dir()
         .map(|directory| directory.join("settings.json"))
         .map_err(|error| format!("无法确定配置目录: {error}"))
+}
+
+fn compatibility_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join("compatibility-analysis.json"))
+        .map_err(|error| format!("无法确定兼容性缓存目录: {error}"))
 }
 
 fn legacy_settings_path() -> Option<PathBuf> {
@@ -713,6 +742,11 @@ fn compatibility_architecture() -> &'static str {
 fn profile_runnable(status: &str, platform: &str, architecture: &str) -> bool {
     status == "verified"
         || (status == "pending-live-validation" && platform == "win32" && architecture == "x64")
+        || (matches!(status, "candidate" | "locally-verified")
+            && matches!(
+                (platform, architecture),
+                ("darwin", "arm64") | ("win32", "x64") | ("linux", "x64")
+            ))
 }
 
 fn installation_roots(installation_path: &Path) -> Vec<PathBuf> {
@@ -1131,17 +1165,60 @@ fn graph_fingerprint(data: &[u8], path: PathBuf) -> GraphInspection {
     }
 }
 
+fn local_compatibility_profiles(
+    cache_path: Option<&Path>,
+    analyzer_version: u32,
+) -> Result<Vec<CompatibilityProfile>, String> {
+    let Some(cache_path) = cache_path.filter(|path| path.is_file()) else {
+        return Ok(Vec::new());
+    };
+    let contents = fs::read_to_string(cache_path)
+        .map_err(|error| format!("无法读取本地兼容性缓存 {}: {error}", cache_path.display()))?;
+    let manifest: CompatibilityManifest = serde_json::from_str(&contents)
+        .map_err(|error| format!("本地兼容性缓存无效 {}: {error}", cache_path.display()))?;
+    validate_local_compatibility_manifest(manifest, analyzer_version)
+}
+
+fn validate_local_compatibility_manifest(
+    manifest: CompatibilityManifest,
+    analyzer_version: u32,
+) -> Result<Vec<CompatibilityProfile>, String> {
+    if manifest.schema_version != 1 {
+        return Err(format!(
+            "不支持的本地兼容性缓存版本: {}",
+            manifest.schema_version
+        ));
+    }
+    if manifest.analyzer_version != Some(analyzer_version) {
+        return Ok(Vec::new());
+    }
+    Ok(manifest
+        .profiles
+        .into_iter()
+        .filter(|profile| {
+            matches!(
+                profile.hook.status.as_str(),
+                "candidate" | "locally-verified"
+            )
+        })
+        .collect())
+}
+
 fn inspect_graph_compatibility(
     app_path: &Path,
-    _logic_version: &str,
+    cache_path: Option<&Path>,
 ) -> Result<GraphInspection, String> {
     let graph_path = find_graph_binary(app_path)?;
     let data = fs::read(&graph_path)
         .map_err(|error| format!("无法读取 GraphServer {}: {error}", graph_path.display()))?;
     let mut inspection = graph_fingerprint(&data, graph_path);
-    let manifest = compatibility_manifest()?;
-    let candidates: Vec<_> = manifest
-        .profiles
+    let built_in = compatibility_manifest()?;
+    let analyzer_version = built_in
+        .analyzer_version
+        .ok_or_else(|| "内置兼容 profile 清单缺少 analyzerVersion".to_string())?;
+    let mut profiles = built_in.profiles;
+    profiles.extend(local_compatibility_profiles(cache_path, analyzer_version)?);
+    let candidates: Vec<_> = profiles
         .into_iter()
         .filter(|profile| {
             profile.platform == compatibility_platform()
@@ -1172,6 +1249,78 @@ fn collect_child_output(child: &mut Child) -> (String, String) {
         let _ = stream.read_to_string(&mut stderr);
     }
     (stdout, stderr)
+}
+
+fn run_offline_compatibility_analysis(
+    app: &AppHandle,
+    runtime_path: &Path,
+    graph_path: &Path,
+    logic_version: &str,
+    force: bool,
+) -> Result<OfflineAnalysisResult, String> {
+    let bridge = bridge_root(app)?;
+    let analyzer = bridge.join("lib/offline-compatibility.cjs");
+    if !analyzer.is_file() {
+        return Err(format!("离线兼容性分析器不存在: {}", analyzer.display()));
+    }
+    let executable = logic_executable(runtime_path);
+    if !executable.is_file() {
+        return Err(format!("Logic 可执行文件不存在: {}", executable.display()));
+    }
+    let cache = compatibility_cache_path(app)?;
+    let mut command = Command::new(executable);
+    command
+        // Keep the script relative to cwd for Electron RunAsNode on Windows.
+        .arg("lib/offline-compatibility.cjs")
+        .arg(graph_path)
+        .args(["--logic-version", logic_version])
+        .args(["--platform", compatibility_platform()])
+        .args(["--architecture", compatibility_architecture()])
+        .arg("--cache")
+        .arg(&cache)
+        .current_dir(&bridge)
+        .env("ELECTRON_RUN_AS_NODE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if force {
+        command.arg("--force");
+    }
+    configure_child_process(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("无法启动离线兼容性分析: {error}"))?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < OFFLINE_ANALYSIS_TIMEOUT => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("离线兼容性分析超时".to_string());
+            }
+            Err(error) => {
+                let _ = child.kill();
+                return Err(format!("离线兼容性分析进程失败: {error}"));
+            }
+        }
+    };
+    let (stdout, stderr) = collect_child_output(&mut child);
+    if !status.success() {
+        return Err(format!("离线兼容性分析失败（{status}）: {}", stderr.trim()));
+    }
+    serde_json::from_str(stdout.trim()).map_err(|error| format!("离线兼容性分析响应无效: {error}"))
+}
+
+fn profile_matches_graph(profile: &CompatibilityProfile, graph: &GraphInspection) -> bool {
+    profile.platform == compatibility_platform()
+        && profile.architecture == compatibility_architecture()
+        && profile.graph.identity_kind == graph.identity_kind
+        && profile.graph.identity.eq_ignore_ascii_case(&graph.identity)
+        && profile.graph.sha256.eq_ignore_ascii_case(&graph.sha256)
 }
 
 fn probe_logic_node(executable: &Path, timeout: Duration) -> Result<NodeVersions, String> {
@@ -1233,7 +1382,11 @@ fn probe_logic_node(executable: &Path, timeout: Duration) -> Result<NodeVersions
     }
 }
 
-fn inspect_logic_path(app_path: &Path) -> LogicInspection {
+fn inspect_logic_path(
+    app: Option<&AppHandle>,
+    app_path: &Path,
+    force_offline_analysis: bool,
+) -> LogicInspection {
     let runtime_path = match resolve_logic_installation(app_path) {
         Ok(path) => path,
         Err(error) => return LogicInspection::failure(app_path, None, error),
@@ -1242,10 +1395,95 @@ fn inspect_logic_path(app_path: &Path) -> LogicInspection {
         Ok(version) => version,
         Err(error) => return LogicInspection::failure(app_path, None, error),
     };
-    let graph = match inspect_graph_compatibility(&runtime_path, &version) {
+    let cache_path = app.and_then(|app| compatibility_cache_path(app).ok());
+    let mut graph = match inspect_graph_compatibility(&runtime_path, cache_path.as_deref()) {
         Ok(graph) => graph,
         Err(error) => return LogicInspection::failure(app_path, Some(version), error),
     };
+    let should_analyze = graph.profile.is_none()
+        || (force_offline_analysis
+            && graph.profile.as_ref().is_some_and(|profile| {
+                matches!(
+                    profile.hook.status.as_str(),
+                    "candidate" | "locally-verified"
+                )
+            }));
+    if should_analyze {
+        if let Some(app) = app {
+            match run_offline_compatibility_analysis(
+                app,
+                &runtime_path,
+                &graph.path,
+                &version,
+                force_offline_analysis,
+            ) {
+                Ok(analysis) if analysis.status == "candidate" => {
+                    let Some(profile) = analysis.profile else {
+                        return LogicInspection::failure(
+                            app_path,
+                            Some(version),
+                            "离线分析返回 candidate 但没有 profile",
+                        );
+                    };
+                    if !profile_matches_graph(&profile, &graph) {
+                        return LogicInspection::failure(
+                            app_path,
+                            Some(version),
+                            "离线分析 profile 与当前 GraphServer 指纹不一致",
+                        );
+                    }
+                    graph.profile = Some(profile);
+                }
+                Ok(analysis) if analysis.status == "unsupported" => {
+                    return LogicInspection {
+                        path: app_path.display().to_string(),
+                        version: Some(version),
+                        supported: false,
+                        runnable: false,
+                        error: Some(format!(
+                            "离线兼容性分析{}未通过: {}。请参考手工 profile 分析文档",
+                            if analysis.cached { "（缓存）" } else { "" },
+                            analysis.reason
+                        )),
+                        node_version: None,
+                        electron_version: None,
+                        profile_id: None,
+                        graph_path: Some(graph.path.display().to_string()),
+                        graph_format: Some(graph.format),
+                        graph_identity_kind: Some(graph.identity_kind),
+                        graph_identity: Some(graph.identity),
+                        graph_sha256: Some(graph.sha256),
+                        hook_status: Some("unsupported".to_string()),
+                    };
+                }
+                Ok(analysis) => {
+                    return LogicInspection::failure(
+                        app_path,
+                        Some(version),
+                        format!("离线兼容性分析返回未知状态: {}", analysis.status),
+                    );
+                }
+                Err(error) => {
+                    return LogicInspection {
+                        path: app_path.display().to_string(),
+                        version: Some(version),
+                        supported: false,
+                        runnable: false,
+                        error: Some(format!("无法完成离线兼容性分析: {error}")),
+                        node_version: None,
+                        electron_version: None,
+                        profile_id: None,
+                        graph_path: Some(graph.path.display().to_string()),
+                        graph_format: Some(graph.format),
+                        graph_identity_kind: Some(graph.identity_kind),
+                        graph_identity: Some(graph.identity),
+                        graph_sha256: Some(graph.sha256),
+                        hook_status: Some("unsupported".to_string()),
+                    };
+                }
+            }
+        }
+    }
     let Some(profile) = graph.profile.as_ref() else {
         return LogicInspection {
             path: app_path.display().to_string(),
@@ -1264,7 +1502,7 @@ fn inspect_logic_path(app_path: &Path) -> LogicInspection {
             graph_identity_kind: Some(graph.identity_kind),
             graph_identity: Some(graph.identity),
             graph_sha256: Some(graph.sha256),
-            hook_status: None,
+            hook_status: Some("unknown".to_string()),
         };
     };
     let supported = profile.hook.status == "verified";
@@ -1318,7 +1556,7 @@ fn inspect_logic_path(app_path: &Path) -> LogicInspection {
     }
     let validation_notice = (!supported).then(|| {
         format!(
-            "实验性 Windows profile，等待本机 PXLogic 捕获验证: {}",
+            "实验性离线 profile，等待 ABI 与本机 PXLogic 捕获验证: {}",
             profile.hook.validation
         )
     });
@@ -1429,7 +1667,7 @@ fn installed_logic_candidates() -> Vec<PathBuf> {
     Vec::new()
 }
 
-fn scan_logic_paths(saved_path: Option<&str>) -> Vec<LogicInspection> {
+fn scan_logic_paths(app: &AppHandle, saved_path: Option<&str>) -> Vec<LogicInspection> {
     let mut candidates = installed_logic_candidates();
     if let Some(path) = saved_path.filter(|path| !path.trim().is_empty()) {
         candidates.insert(0, PathBuf::from(path.trim()));
@@ -1441,7 +1679,7 @@ fn scan_logic_paths(saved_path: Option<&str>) -> Vec<LogicInspection> {
         if !seen.insert(key) || !candidate.exists() {
             continue;
         }
-        applications.push(inspect_logic_path(&candidate));
+        applications.push(inspect_logic_path(Some(app), &candidate, false));
     }
     applications.sort_by_key(|inspection| !inspection.runnable);
     applications
@@ -1499,7 +1737,10 @@ fn validate_bridge_payload(app: &AppHandle) -> Result<BridgePayload, String> {
         root.join("lib/capture-controller.cjs"),
         root.join("lib/compatibility.cjs"),
         root.join("lib/logic-format.cjs"),
+        root.join("lib/macos-hook-locator.cjs"),
+        root.join("lib/offline-compatibility.cjs"),
         root.join("lib/websocket-proxy.cjs"),
+        root.join("lib/windows-hook-locator.cjs"),
         root.join("compatibility/profiles.json"),
         root.join("extensions/qmi8660/extension.json"),
         root.join("extensions/qmi8660/HighLevelAnalyzer.py"),
@@ -1828,7 +2069,7 @@ async fn client_initial_state(app: AppHandle) -> Result<InitialState, String> {
     let worker_app = app.clone();
     let (mut settings, applications, hardware) = tauri::async_runtime::spawn_blocking(move || {
         let settings = load_settings(&worker_app);
-        let applications = scan_logic_paths(Some(&settings.logic_app_path));
+        let applications = scan_logic_paths(&worker_app, Some(&settings.logic_app_path));
         let hardware = scan_pxlogic_hardware(&worker_app, &settings.pxlogic_device_id);
         (settings, applications, hardware)
     })
@@ -1885,17 +2126,28 @@ fn client_save_settings(
 }
 
 #[tauri::command]
-async fn logic_scan(saved_path: String) -> Result<Vec<LogicInspection>, String> {
-    tauri::async_runtime::spawn_blocking(move || scan_logic_paths(Some(&saved_path)))
+async fn logic_scan(app: AppHandle, saved_path: String) -> Result<Vec<LogicInspection>, String> {
+    tauri::async_runtime::spawn_blocking(move || scan_logic_paths(&app, Some(&saved_path)))
         .await
         .map_err(|error| format!("Logic 扫描任务失败: {error}"))
 }
 
 #[tauri::command]
-async fn logic_inspect(app_path: String) -> Result<LogicInspection, String> {
-    tauri::async_runtime::spawn_blocking(move || inspect_logic_path(Path::new(app_path.trim())))
-        .await
-        .map_err(|error| format!("Logic 检查任务失败: {error}"))
+async fn logic_inspect(app: AppHandle, app_path: String) -> Result<LogicInspection, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        inspect_logic_path(Some(&app), Path::new(app_path.trim()), false)
+    })
+    .await
+    .map_err(|error| format!("Logic 检查任务失败: {error}"))
+}
+
+#[tauri::command]
+async fn logic_analyze(app: AppHandle, app_path: String) -> Result<LogicInspection, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        inspect_logic_path(Some(&app), Path::new(app_path.trim()), true)
+    })
+    .await
+    .map_err(|error| format!("Logic 兼容性分析任务失败: {error}"))
 }
 
 #[tauri::command]
@@ -1912,10 +2164,11 @@ async fn pxlogic_scan(
 
 #[tauri::command]
 async fn logic_browse(app: AppHandle) -> Result<Option<LogicInspection>, String> {
+    let dialog_app = app.clone();
     let selected = tauri::async_runtime::spawn_blocking(move || {
         #[cfg(target_os = "linux")]
         {
-            return app
+            return dialog_app
                 .dialog()
                 .file()
                 .set_title("选择 Saleae Logic 2 AppImage")
@@ -1923,7 +2176,8 @@ async fn logic_browse(app: AppHandle) -> Result<Option<LogicInspection>, String>
                 .blocking_pick_file();
         }
         #[cfg(not(target_os = "linux"))]
-        app.dialog()
+        dialog_app
+            .dialog()
             .file()
             .set_title("选择 Saleae Logic 2")
             .blocking_pick_folder()
@@ -1936,7 +2190,7 @@ async fn logic_browse(app: AppHandle) -> Result<Option<LogicInspection>, String>
     let path = path
         .into_path()
         .map_err(|error| format!("选择的路径无效: {error}"))?;
-    Ok(Some(inspect_logic_path(&path)))
+    Ok(Some(inspect_logic_path(Some(&app), &path, false)))
 }
 
 #[tauri::command]
@@ -1983,7 +2237,7 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
     let mut settings = store_settings(app, settings)?;
     let selected_app_path = PathBuf::from(&settings.logic_app_path);
     let app_path = resolve_logic_installation(&selected_app_path)?;
-    let inspection = inspect_logic_path(&selected_app_path);
+    let inspection = inspect_logic_path(Some(app), &selected_app_path, false);
     if !inspection.runnable {
         return Err(inspection
             .error
@@ -2048,8 +2302,17 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
     } else {
         command.args(["--screen-quadrant", &settings.screen_quadrant.to_string()]);
     }
-    if inspection.hook_status.as_deref() == Some("pending-live-validation") {
+    if matches!(
+        inspection.hook_status.as_deref(),
+        Some("pending-live-validation" | "candidate" | "locally-verified")
+    ) {
         command.arg("--allow-pending-profile");
+    }
+    let compatibility_cache = compatibility_cache_path(app)?;
+    if compatibility_cache.is_file() {
+        command
+            .arg("--compatibility-profiles")
+            .arg(compatibility_cache);
     }
     configure_child_process(&mut command);
     let mut child = command
@@ -2151,6 +2414,46 @@ fn logs_open() -> Result<(), String> {
     Ok(())
 }
 
+fn compatibility_manual_path(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let packaged = resource_dir.join("docs/graphserver-profile-manual.md");
+        if packaged.is_file() {
+            return Ok(packaged);
+        }
+    }
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .map(|root| root.join("docs/graphserver-profile-manual.md"))
+        .ok_or_else(|| "无法确定手工兼容性指南路径".to_string())?;
+    if development.is_file() {
+        Ok(development)
+    } else {
+        Err(format!("手工兼容性指南不存在: {}", development.display()))
+    }
+}
+
+#[tauri::command]
+fn manual_open(app: AppHandle) -> Result<(), String> {
+    let manual = compatibility_manual_path(&app)?;
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer.exe");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+    command
+        .arg(&manual)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_child_process(&mut command);
+    command
+        .spawn()
+        .map_err(|error| format!("无法打开手工兼容性指南: {error}"))?;
+    Ok(())
+}
+
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let menu = MenuBuilder::new(app)
         .text("show", "显示 PXLogic Bridge")
@@ -2206,11 +2509,13 @@ fn main() {
             client_save_settings,
             logic_scan,
             logic_inspect,
+            logic_analyze,
             logic_browse,
             pxlogic_scan,
             bridge_start,
             bridge_stop,
             logs_open,
+            manual_open,
         ])
         .setup(setup_tray)
         .on_window_event(|window, event| {
@@ -2253,7 +2558,8 @@ mod tests {
             screen_quadrant: 9,
             maximize_logic_window: true,
             pxlogic_device_id: "  usb:1234  ".to_string(),
-            pxlogic_threshold_volts: 4.2,
+            pxlogic_threshold_volts: 1.12,
+            temporary_comparator_threshold_volts: None,
         }
         .normalized();
         assert_eq!(settings.logic_app_path, "/Applications/Saleae Logic.app");
@@ -2262,7 +2568,7 @@ mod tests {
         assert_eq!(settings.screen_quadrant, 3);
         assert!(settings.maximize_logic_window);
         assert_eq!(settings.pxlogic_device_id, "usb:1234");
-        assert_eq!(settings.pxlogic_threshold_volts, 1.8);
+        assert_eq!(settings.pxlogic_threshold_volts, 1.12);
     }
 
     #[test]
@@ -2274,6 +2580,28 @@ mod tests {
         assert!(settings.maximize_logic_window);
         assert_eq!(settings.pxlogic_device_id, "");
         assert_eq!(settings.pxlogic_threshold_volts, 1.8);
+    }
+
+    #[test]
+    fn keeps_existing_pxview_threshold_value() {
+        let settings: ClientSettings = serde_json::from_str(
+            r#"{"logicAppPath":"","portMode":"auto","preferredPort":12472,"screenQuadrant":3,"pxlogicThresholdVolts":2.5}"#,
+        )
+        .unwrap();
+        let settings = settings.normalized();
+        assert_eq!(settings.pxlogic_threshold_volts, 2.5);
+        assert!(settings.temporary_comparator_threshold_volts.is_none());
+    }
+
+    #[test]
+    fn migrates_temporary_comparator_field_without_rescaling() {
+        let settings: ClientSettings = serde_json::from_str(
+            r#"{"logicAppPath":"","portMode":"auto","preferredPort":12472,"screenQuadrant":3,"pxlogicComparatorThresholdVolts":1.2}"#,
+        )
+        .unwrap();
+        let settings = settings.normalized();
+        assert_eq!(settings.pxlogic_threshold_volts, 1.2);
+        assert!(settings.temporary_comparator_threshold_volts.is_none());
     }
 
     #[test]
@@ -2411,13 +2739,56 @@ mod tests {
         let manifest = compatibility_manifest().unwrap();
         assert_eq!(manifest.schema_version, 1);
         assert!(manifest
+            .analyzer_version
+            .is_some_and(|version| version >= 1));
+        assert!(manifest
             .profiles
             .iter()
             .any(|profile| profile.id == "logic-2.4.46-macos-arm64-0df17631"));
     }
 
     #[test]
-    fn only_allows_pending_profile_for_the_windows_validation_target() {
+    fn rejects_stale_or_invalid_local_compatibility_profiles() {
+        let current = compatibility_manifest().unwrap().analyzer_version.unwrap();
+        let parse = |analyzer_version: u32, status: &str| {
+            serde_json::from_value::<CompatibilityManifest>(serde_json::json!({
+                "schemaVersion": 1,
+                "analyzerVersion": analyzer_version,
+                "profiles": [{
+                    "id": "local-test",
+                    "platform": "darwin",
+                    "architecture": "arm64",
+                    "graph": {
+                        "identityKind": "macho-lc-uuid",
+                        "identity": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+                        "sha256": "00"
+                    },
+                    "hook": { "status": status, "validation": "test" }
+                }]
+            }))
+            .unwrap()
+        };
+
+        assert_eq!(
+            validate_local_compatibility_manifest(parse(current, "candidate"), current)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            validate_local_compatibility_manifest(parse(current + 1, "candidate"), current)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            validate_local_compatibility_manifest(parse(current, "verified"), current)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn allows_known_pending_and_exact_offline_candidate_targets() {
         assert!(profile_runnable("verified", "darwin", "arm64"));
         assert!(profile_runnable("pending-live-validation", "win32", "x64"));
         assert!(!profile_runnable("pending-live-validation", "linux", "x64"));
@@ -2426,5 +2797,10 @@ mod tests {
             "win32",
             "arm64"
         ));
+        assert!(profile_runnable("candidate", "darwin", "arm64"));
+        assert!(profile_runnable("candidate", "win32", "x64"));
+        assert!(profile_runnable("candidate", "linux", "x64"));
+        assert!(!profile_runnable("candidate", "darwin", "x64"));
+        assert!(!profile_runnable("unsupported", "darwin", "arm64"));
     }
 }

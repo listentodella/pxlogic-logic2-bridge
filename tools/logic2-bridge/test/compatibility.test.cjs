@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {
+  loadCompatibilityManifest,
   loadCompatibilityProfiles,
   matchCompatibilityProfile,
   parseBinaryIdentity,
@@ -141,10 +142,14 @@ test('reuses an exact GraphServer binary profile across outer Logic versions', t
 });
 
 test('keeps only exact GraphServer identities in the profile manifest', () => {
+  const manifest = loadCompatibilityManifest();
+  assert.equal(manifest.analyzerVersion, 2);
   const profiles = loadCompatibilityProfiles();
   assert.deepEqual(
     profiles.map(profile => [profile.platform, profile.hook.status]),
     [
+      ['darwin', 'verified'],
+      ['darwin', 'verified'],
       ['darwin', 'verified'],
       ['linux', 'pending-live-validation'],
       ['win32', 'pending-live-validation'],

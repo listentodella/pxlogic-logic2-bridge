@@ -10,11 +10,13 @@ function createTauriApi() {
     saveSettings: settings => invoke('client_save_settings', { settings }),
     scanLogicApps: savedPath => invoke('logic_scan', { savedPath }),
     inspectLogicApp: appPath => invoke('logic_inspect', { appPath }),
+    analyzeLogicApp: appPath => invoke('logic_analyze', { appPath }),
     browseLogicApp: () => invoke('logic_browse'),
     scanHardware: preferredDeviceId => invoke('pxlogic_scan', { preferredDeviceId }),
     start: settings => invoke('bridge_start', { settings }),
     stop: () => invoke('bridge_stop'),
     openLogs: () => invoke('logs_open'),
+    openManual: () => invoke('manual_open'),
     onState: callback => void listen('bridge-state', event => callback(event.payload)),
     onLog: callback => void listen('bridge-log', event => callback(event.payload)),
   };
@@ -31,6 +33,11 @@ const elements = {
   logicVersion: document.querySelector('#logic-version'),
   graphFingerprint: document.querySelector('#graph-fingerprint'),
   compatibility: document.querySelector('#logic-compatibility'),
+  compatibilityWarning: document.querySelector('#compatibility-warning'),
+  compatibilityWarningMessage: document.querySelector('#compatibility-warning-message'),
+  openManualButton: document.querySelector('#open-manual-button'),
+  closeWarningButton: document.querySelector('#close-warning-button'),
+  analyzeButton: document.querySelector('#analyze-button'),
   rescanButton: document.querySelector('#rescan-button'),
   browseButton: document.querySelector('#browse-button'),
   pxlogicSummary: document.querySelector('#pxlogic-summary'),
@@ -41,7 +48,7 @@ const elements = {
   pxlogicUsbSpeed: document.querySelector('#pxlogic-usb-speed'),
   pxlogicFirmware: document.querySelector('#pxlogic-firmware'),
   pxlogicBitstream: document.querySelector('#pxlogic-bitstream'),
-  pxlogicComparator: document.querySelector('#pxlogic-comparator'),
+  pxlogicThresholdValue: document.querySelector('#pxlogic-threshold-value'),
   portAuto: document.querySelector('#port-auto'),
   portFixed: document.querySelector('#port-fixed'),
   preferredPort: document.querySelector('#preferred-port'),
@@ -59,7 +66,9 @@ let currentState = { phase: 'stopped', actualPort: null, message: '待机' };
 let currentInspection = null;
 let currentHardware = null;
 let hardwareScanning = false;
+let logicAnalyzing = false;
 let inspectionSequence = 0;
+const warnedCompatibilityFingerprints = new Set();
 
 function isActive() {
   return ['starting', 'running', 'stopping'].includes(currentState.phase);
@@ -87,6 +96,12 @@ function isHardwareReady() {
     currentHardware?.bitstreamResourcesReady && !currentHardware?.error);
 }
 
+function isHardwareThresholdValid() {
+  if (!elements.pxlogicThreshold.value.trim()) return false;
+  const threshold = Number(elements.pxlogicThreshold.value);
+  return Number.isFinite(threshold) && threshold >= 0 && threshold <= 6.668;
+}
+
 function renderState(state) {
   currentState = state;
   elements.status.className = `status status-${state.phase}`;
@@ -103,9 +118,11 @@ function renderState(state) {
         : '启动 Logic 2';
   elements.startButton.classList.toggle('stop', isActive());
   const disableSettings = isActive();
-  elements.logicPath.disabled = disableSettings;
-  elements.rescanButton.disabled = disableSettings;
-  elements.browseButton.disabled = disableSettings;
+  elements.logicPath.disabled = disableSettings || logicAnalyzing;
+  elements.rescanButton.disabled = disableSettings || logicAnalyzing;
+  elements.browseButton.disabled = disableSettings || logicAnalyzing;
+  elements.analyzeButton.disabled = disableSettings || logicAnalyzing ||
+    !elements.logicPath.value.trim();
   elements.pxlogicRescanButton.disabled = disableSettings || hardwareScanning;
   elements.pxlogicDevice.disabled = disableSettings || hardwareScanning ||
     !currentHardware?.devices?.length;
@@ -115,6 +132,8 @@ function renderState(state) {
   elements.preferredPort.disabled = disableSettings || portMode !== 'fixed';
   elements.screenQuadrant.disabled = disableSettings;
   elements.startButton.disabled = state.phase === 'starting' || state.phase === 'stopping' ||
+    logicAnalyzing ||
+    !isHardwareThresholdValid() ||
     (!disableSettings && (!currentInspection?.runnable || !isHardwareReady()));
 }
 
@@ -149,16 +168,33 @@ function renderInspection(inspection) {
     elements.compatibility.classList.add('compatible');
   } else if (inspection.runnable) {
     elements.logicSummary.textContent = inspection.error || `实验性 ${inspection.profileId}`;
-    elements.compatibility.textContent = '实验性';
+    elements.compatibility.textContent = inspection.hookStatus === 'candidate'
+      ? '自动候选'
+      : '实验性';
     elements.compatibility.classList.add('experimental');
   } else {
     elements.logicSummary.textContent = inspection.error || '安装不可用';
-    elements.compatibility.textContent = inspection.graphIdentity
-      ? (inspection.hookStatus ? '待验证' : '未收录')
-      : '不兼容';
+    elements.compatibility.textContent = inspection.hookStatus === 'unsupported'
+      ? '不可用'
+      : inspection.hookStatus === 'unknown'
+        ? '未收录'
+        : inspection.graphIdentity && inspection.hookStatus
+          ? '待验证'
+          : '不兼容';
     elements.compatibility.classList.add('incompatible');
   }
   renderState(currentState);
+  showCompatibilityWarning(inspection);
+}
+
+function showCompatibilityWarning(inspection) {
+  if (inspection?.hookStatus !== 'unsupported') return;
+  const key = inspection.graphSha256 || `${inspection.path}:${inspection.error}`;
+  if (warnedCompatibilityFingerprints.has(key)) return;
+  warnedCompatibilityFingerprints.add(key);
+  elements.compatibilityWarningMessage.textContent = inspection.error ||
+    '自动分析没有得到唯一且可安全注入的候选。';
+  if (!elements.compatibilityWarning.open) elements.compatibilityWarning.showModal();
 }
 
 function renderApplications(applications) {
@@ -214,13 +250,18 @@ function renderHardware(hardware) {
     'hardware-error',
     !hardware?.bitstreamResourcesReady,
   );
-  updateComparatorLabel();
+  updateThresholdLabel();
   renderState(currentState);
 }
 
-function updateComparatorLabel() {
-  const level = Number(elements.pxlogicThreshold.value || 1.8);
-  elements.pxlogicComparator.textContent = `${(level * 0.5).toFixed(2)} V`;
+function updateThresholdLabel() {
+  const threshold = Number(elements.pxlogicThreshold.value);
+  const valid = isHardwareThresholdValid();
+  elements.pxlogicThresholdValue.textContent = valid ? `${threshold.toFixed(3)} V` : '无效';
+  elements.pxlogicThresholdValue.classList.toggle('hardware-error', !valid);
+  elements.pxlogicThreshold.setCustomValidity(
+    valid ? '' : '电压判断阈值必须在 0.000 V 到 6.668 V 之间',
+  );
 }
 
 async function inspectPath() {
@@ -288,6 +329,24 @@ elements.rescanButton.addEventListener('click', async () => {
   }
   elements.rescanButton.disabled = false;
 });
+elements.analyzeButton.addEventListener('click', async () => {
+  if (typeof api.analyzeLogicApp !== 'function') return;
+  logicAnalyzing = true;
+  elements.logicSummary.textContent = '正在本机分析 GraphServer...';
+  renderState(currentState);
+  try {
+    const inspection = await api.analyzeLogicApp(elements.logicPath.value.trim());
+    renderInspection(inspection);
+    if (!inspection.runnable && inspection.error) {
+      appendLog(`[compatibility] ${inspection.error}`);
+    }
+  } catch (error) {
+    appendLog(`[compatibility] ${errorMessage(error)}`);
+  } finally {
+    logicAnalyzing = false;
+    renderState(currentState);
+  }
+});
 elements.browseButton.addEventListener('click', async () => {
   const inspection = await api.browseLogicApp();
   if (!inspection) return;
@@ -300,8 +359,12 @@ elements.pxlogicDevice.addEventListener('change', () => {
   renderHardware(currentHardware);
   persistSettings();
 });
+elements.pxlogicThreshold.addEventListener('input', () => {
+  updateThresholdLabel();
+  renderState(currentState);
+});
 elements.pxlogicThreshold.addEventListener('change', () => {
-  updateComparatorLabel();
+  if (!elements.pxlogicThreshold.reportValidity()) return;
   persistSettings();
 });
 elements.pxlogicRescanButton.addEventListener('click', async () => {
@@ -319,11 +382,23 @@ elements.pxlogicRescanButton.addEventListener('click', async () => {
   }
 });
 elements.openLogsButton.addEventListener('click', () => api.openLogs());
+elements.openManualButton.addEventListener('click', async () => {
+  try {
+    if (typeof api.openManual !== 'function') throw new Error('当前客户端未包含手工指南入口');
+    await api.openManual();
+  } catch (error) {
+    appendLog(`[compatibility] ${errorMessage(error)}`);
+  }
+});
+elements.closeWarningButton.addEventListener('click', () => {
+  elements.compatibilityWarning.close();
+});
 elements.startButton.addEventListener('click', async () => {
   try {
     if (isActive()) {
       await api.stop();
     } else {
+      if (!elements.pxlogicThreshold.reportValidity()) return;
       const state = await api.start(readSettings());
       renderState(state);
     }
@@ -338,11 +413,15 @@ api.onState(renderState);
 api.onLog(appendLog);
 
 async function initialize() {
+  if (typeof api.analyzeLogicApp !== 'function') elements.analyzeButton.hidden = true;
   const initial = await api.initialState();
   renderApplications(initial.applications);
   elements.logicPath.value = initial.settings.logicAppPath;
   elements.preferredPort.value = initial.settings.preferredPort;
-  elements.pxlogicThreshold.value = String(initial.settings.pxlogicThresholdVolts || 1.8);
+  elements.pxlogicThreshold.value = String(
+    initial.settings.pxlogicThresholdVolts ??
+      initial.settings.pxlogicComparatorThresholdVolts ?? 1.8,
+  );
   elements.screenQuadrant.value = initial.settings.maximizeLogicWindow === false
     ? String(initial.settings.screenQuadrant)
     : 'maximized';

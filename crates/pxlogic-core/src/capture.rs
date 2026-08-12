@@ -224,6 +224,7 @@ pub fn supported_samplerates() -> &'static [u64] {
         2_000_000,
         4_000_000,
         5_000_000,
+        6_250_000,
         10_000_000,
         20_000_000,
         25_000_000,
@@ -253,6 +254,7 @@ pub fn gpio_timing_for_samplerate(sample_rate_hz: u64) -> Result<GpioTiming> {
         25_000_000 => GpioTiming { mode: 7, div: 3 },
         20_000_000 => GpioTiming { mode: 7, div: 4 },
         10_000_000 => GpioTiming { mode: 7, div: 9 },
+        6_250_000 => GpioTiming { mode: 7, div: 15 },
         5_000_000 => GpioTiming { mode: 7, div: 19 },
         4_000_000 => GpioTiming { mode: 7, div: 24 },
         2_000_000 => GpioTiming { mode: 7, div: 49 },
@@ -521,6 +523,16 @@ pub fn build_capture_register_script_for_channels(
         RegisterWrite {
             addr: protocol::REG_THRESHOLD_VALUE,
             value: threshold_vth,
+        },
+        // A logic capture must never inherit an output left enabled by an
+        // earlier PXView/PWM session. PXView clears both outputs here too.
+        RegisterWrite {
+            addr: protocol::REG_PWM0_ENABLE,
+            value: 0,
+        },
+        RegisterWrite {
+            addr: protocol::REG_PWM1_ENABLE,
+            value: 0,
         },
         RegisterWrite {
             addr: protocol::REG_STREAM_CHANNEL_ENABLE,
@@ -1419,6 +1431,11 @@ mod tests {
             gpio_timing_for_samplerate(10_000_000).unwrap(),
             GpioTiming { mode: 7, div: 9 }
         );
+        assert_eq!(
+            gpio_timing_for_samplerate(6_250_000).unwrap(),
+            GpioTiming { mode: 7, div: 15 }
+        );
+        assert!(supported_samplerates().contains(&6_250_000));
         assert!(gpio_timing_for_samplerate(24_000_000).is_err());
     }
 
@@ -1488,7 +1505,7 @@ mod tests {
         let script =
             build_capture_register_script(4096, 65_536, 16, 250_000_000, CaptureProfile::default())
                 .unwrap();
-        assert_eq!(script.len(), 25);
+        assert_eq!(script.len(), 27);
         assert_eq!(
             script[0],
             RegisterWrite {
@@ -1497,19 +1514,27 @@ mod tests {
             }
         );
         assert_eq!(
-            script[9],
+            script[11],
             RegisterWrite {
                 addr: protocol::REG_CAPTURE_BYTES_LOW,
                 value: 69_632
             }
         );
         assert_eq!(
-            script[18],
+            script[20],
             RegisterWrite {
                 addr: protocol::REG_STREAM_CHANNEL_ENABLE,
                 value: 0x0000_FFFF
             }
         );
+        assert!(script.contains(&RegisterWrite {
+            addr: protocol::REG_PWM0_ENABLE,
+            value: 0,
+        }));
+        assert!(script.contains(&RegisterWrite {
+            addr: protocol::REG_PWM1_ENABLE,
+            value: 0,
+        }));
     }
 
     #[test]

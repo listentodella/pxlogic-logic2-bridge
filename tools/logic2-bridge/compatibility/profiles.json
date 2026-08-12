@@ -1,6 +1,49 @@
 {
   "schemaVersion": 1,
+  "analyzerVersion": 2,
   "profiles": [
+    {
+      "id": "logic-2.4.36-macos-arm64-43df238d",
+      "logicVersion": "2.4.36",
+      "platform": "darwin",
+      "architecture": "arm64",
+      "runtimeLayout": "macos-app",
+      "graph": {
+        "relativePath": "Contents/Resources/macos-arm64/libgraph_server_shared.dylib",
+        "format": "mach-o",
+        "identityKind": "macho-lc-uuid",
+        "identity": "43DF238D-8DB7-3E9C-B5FB-DA746EDF6B2A",
+        "sha256": "cf4ad1c3351f6037685547df5fe6f58be08cf74f2fd5d518c17aa608eb460c9c"
+      },
+      "hook": {
+        "status": "verified",
+        "onDataBufferOffset": "0x1a536c",
+        "prologueHex": "ff8303d1fa6709a9f85f0aa9f6570ba9",
+        "locatorSignatureHex": "ff8303d1fa6709a9f85f0aa9f6570ba9f44f0ca9fd7b0da9fd43039108a05039280a0034f30303aaf40300aa600840fd00d8617e011842fd21d8617e00c00f910018611e4cd43794e00314aa1c86329475e240a9790240f9f95703a97f7e00a9",
+        "validation": "PXLogic live capture verified on official Logic 2.4.36 at 25 MHz on D0-D1; Logic UI start/stop, GraphServer injection, and zero dropped buffers confirmed"
+      }
+    },
+    {
+      "id": "logic-2.4.45-macos-arm64-7c6f5ed6",
+      "logicVersion": "2.4.45",
+      "platform": "darwin",
+      "architecture": "arm64",
+      "runtimeLayout": "macos-app",
+      "graph": {
+        "relativePath": "Contents/Resources/macos-arm64/libgraph_server_shared.dylib",
+        "format": "mach-o",
+        "identityKind": "macho-lc-uuid",
+        "identity": "7C6F5ED6-F84B-35E2-B528-2A74ADDAD3F3",
+        "sha256": "6254f4c821c462bbcea2e37d0f5942afe483519579d1e0110f0c4f27e50e270a"
+      },
+      "hook": {
+        "status": "verified",
+        "onDataBufferOffset": "0x1df9c0",
+        "prologueHex": "ff8303d1f6570ba9f44f0ca9fd7b0da9",
+        "locatorSignatureHex": "ff8303d1f6570ba9f44f0ca9fd7b0da9fd43039108a0503908060034f40303aaf30300aa600840fd00d8617e011c42fd21d8617e00c00f910018611ed8f83e94603a42f9400a00b4892240a9e9a301a9880000b40821009129008052080129f8",
+        "validation": "PXLogic live capture verified on official Logic 2.4.45 at 6.25 MHz on D0-D15; Logic UI start/stop, GraphServer injection, and zero dropped buffers confirmed"
+      }
+    },
     {
       "id": "logic-2.4.46-macos-arm64-0df17631",
       "logicVersion": "2.4.46",
@@ -18,6 +61,7 @@
         "status": "verified",
         "onDataBufferOffset": "0x1df994",
         "prologueHex": "ff8303d1f6570ba9f44f0ca9fd7b0da9",
+        "locatorSignatureHex": "ff8303d1f6570ba9f44f0ca9fd7b0da9fd43039108a0503908060034f40303aaf30300aa600840fd00d8617e011c42fd21d8617e00c00f910018611e1af93e94603a42f9400a00b4892240a9e9a301a9880000b40821009129008052080129f8",
         "validation": "PXLogic live capture verified on official Logic 2.4.46"
       }
     },

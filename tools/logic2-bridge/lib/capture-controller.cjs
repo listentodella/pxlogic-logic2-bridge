@@ -78,19 +78,14 @@ function requirePath(target, label) {
   if (!fs.existsSync(target)) throw new Error(`${label} was not found: ${target}`);
 }
 
-function startPxlogicFeeder(options, host, captureSettings) {
-  requirePath(options.pxlogicHelper, 'PXLogic USB helper');
-  requirePath(options.bitstreams, 'PXLogic bitstream directory');
-  requirePath(options.firmware, 'PXLogic MCU firmware');
-
+function buildPxlogicHelperArguments(options, captureSettings) {
   const { enabledChannels, sampleRateHz, thresholdVolts } = captureSettings;
   if (!Number.isFinite(thresholdVolts)) {
-    throw new Error('Logic selected a custom digital threshold that PXLogic cannot resolve');
+    throw new Error('PXLogic hardware threshold is not configured');
   }
   const channelSpan = physicalChannelSpan(enabledChannels);
-  host.stdin.write(createInjectionConfig(enabledChannels));
-
   const helperArguments = [
+    '--skip-prepare',
     '--live',
     '--live-cross-only',
     '--mode',
@@ -106,13 +101,74 @@ function startPxlogicFeeder(options, host, captureSettings) {
     '--enabled-channels',
     enabledChannels.join(','),
     '--decode-cross',
-    // PXLogic always uses its recommended one-sample source-side filter.
-    // Logic's UI filter and all digital triggers remain GraphServer operations.
     '--glitch-filter',
   ];
-  if (options.pxlogicDevice) {
-    helperArguments.unshift('--device', options.pxlogicDevice);
-  }
+  if (options.pxlogicDevice) helperArguments.unshift('--device', options.pxlogicDevice);
+  return helperArguments;
+}
+
+function buildPxlogicPrepareArguments(options) {
+  const helperArguments = ['--prepare-only'];
+  if (options.pxlogicDevice) helperArguments.unshift('--device', options.pxlogicDevice);
+  return helperArguments;
+}
+
+function preparePxlogicDevice(options) {
+  requirePath(options.pxlogicHelper, 'PXLogic USB helper');
+  requirePath(options.bitstreams, 'PXLogic bitstream directory');
+  requirePath(options.firmware, 'PXLogic MCU firmware');
+
+  const helperArguments = buildPxlogicPrepareArguments(options);
+  console.error(
+    `[logic2-bridge:pxlogic] preparing FPGA once for this Bridge session: ` +
+    `${options.pxlogicDevice || 'first ready device'}`,
+  );
+  const helper = spawn(options.pxlogicHelper, helperArguments, {
+    cwd: path.dirname(options.pxlogicHelper),
+    env: {
+      ...process.env,
+      PXLOGIC_BITSTREAM_DIR: options.bitstreams,
+      PXLOGIC_MCU_FIRMWARE: options.firmware,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: process.platform === 'win32',
+  });
+  createLineReader(helper.stdout, line => {
+    console.error(`[logic2-bridge:pxlogic-prepare] ${line}`);
+  });
+  createLineReader(helper.stderr, line => {
+    console.error(`[logic2-bridge:pxlogic-prepare] ${line}`);
+  });
+
+  return new Promise((resolve, reject) => {
+    helper.once('error', reject);
+    helper.once('close', (code, signal) => {
+      if (code === 0) {
+        console.error(
+          '[logic2-bridge:pxlogic] FPGA prepared; Start/Stop will not upload bitstreams again',
+        );
+        resolve();
+        return;
+      }
+      reject(new Error(
+        `PXLogic FPGA prepare failed (${signal || `exit ${code}`}); ` +
+        'capture was not enabled',
+      ));
+    });
+  });
+}
+
+function startPxlogicFeeder(options, host, captureSettings) {
+  requirePath(options.pxlogicHelper, 'PXLogic USB helper');
+  requirePath(options.bitstreams, 'PXLogic bitstream directory');
+  requirePath(options.firmware, 'PXLogic MCU firmware');
+
+  const { enabledChannels, sampleRateHz } = captureSettings;
+  const channelSpan = physicalChannelSpan(enabledChannels);
+  host.stdin.write(createInjectionConfig(enabledChannels));
+  // PXLogic always uses its recommended one-sample source-side filter.
+  // Logic's UI filter and all digital triggers remain GraphServer operations.
+  const helperArguments = buildPxlogicHelperArguments(options, captureSettings);
 
   const helper = spawn(options.pxlogicHelper, helperArguments, {
     cwd: path.dirname(options.pxlogicHelper),
@@ -279,6 +335,7 @@ class PxlogicCaptureController {
     this.sessions = new Map();
     this.activeFeeder = null;
     this.activeSessionId = undefined;
+    this.captureUnavailableReason = undefined;
   }
 
   getSessionSettings(sessionId) {
@@ -322,14 +379,14 @@ class PxlogicCaptureController {
       );
     } else if (action.type === 'Saleae::Graph::LogicDevice::SetDigitalVoltageThreshold') {
       settings.thresholdVolts = parseThresholdVolts(action.thresholdDescription);
-      const hardwareLevel = this.options.hardwareThresholdVolts ?? settings.thresholdVolts;
-      const comparator = Number.isFinite(hardwareLevel)
-        ? `${hardwareLevel * 0.5} V`
+      const hardwareThreshold = this.options.hardwareThresholdVolts ?? settings.thresholdVolts;
+      const threshold = Number.isFinite(hardwareThreshold)
+        ? `${hardwareThreshold} V`
         : 'unsupported';
       console.error(
         `[logic2-bridge:control] session=${sessionId ?? 'default'} ` +
         `logic-level=${settings.thresholdVolts ?? 'unsupported'} V ` +
-        `pxlogic-level=${hardwareLevel ?? 'unsupported'} V comparator~${comparator}`,
+        `pxlogic-threshold=${threshold}`,
       );
     } else if (action.type === 'Saleae::Graph::DigitalTriggerSettingsData') {
       console.error(
@@ -353,6 +410,13 @@ class PxlogicCaptureController {
 
   async startCapture(sessionId) {
     if (this.activeFeeder) await this.stopCapture(this.activeSessionId);
+    if (this.captureUnavailableReason) {
+      console.error(
+        `[logic2-bridge:control] refusing capture: ${this.captureUnavailableReason}; ` +
+        'restart PXLogic Bridge to prepare the device again',
+      );
+      return;
+    }
     const settings = this.getSessionSettings(sessionId);
     if (settings.enabledChannels.length === 0) {
       console.error('[logic2-bridge:control] StartCapture has no enabled digital channels');
@@ -367,13 +431,20 @@ class PxlogicCaptureController {
       `[logic2-bridge:control] StartCapture session=${sessionId ?? 'default'} ` +
       `rate=${captureSettings.sampleRateHz} ` +
       `channels=D${captureSettings.enabledChannels.join(',D')} ` +
-      `pxlogic-level=${captureSettings.thresholdVolts} V ` +
+      `pxlogic-threshold=${captureSettings.thresholdVolts} V ` +
       'pxlogic-hardware-glitch-filter=1T pxlogic-hardware-trigger=off',
     );
     const feeder = startPxlogicFeeder(this.options, this.host, captureSettings);
     this.activeFeeder = feeder;
     this.activeSessionId = sessionId;
-    feeder.done.then(() => {
+    feeder.done.then(result => {
+      if (result.failed) {
+        this.captureUnavailableReason = 'the PXLogic capture helper failed';
+        console.error(
+          '[logic2-bridge:control] PXLogic capture disabled for the rest of this Bridge session; ' +
+          'automatic FPGA reconfiguration is intentionally blocked',
+        );
+      }
       if (this.activeFeeder === feeder) {
         this.activeFeeder = null;
         this.activeSessionId = undefined;
@@ -414,9 +485,12 @@ class PxlogicCaptureController {
 
 module.exports = {
   PxlogicCaptureController,
+  buildPxlogicHelperArguments,
+  buildPxlogicPrepareArguments,
   createLineReader,
   describeDigitalTrigger,
   extractLogicRequests,
   parseThresholdVolts,
   physicalChannelSpan,
+  preparePxlogicDevice,
 };

@@ -422,6 +422,11 @@ jobs:
           npx tauri build --target aarch64-apple-darwin \
             --config src-tauri/tauri.macos.conf.json --bundles app
 
+      - name: Ad-hoc sign application bundle
+        run: |
+          codesign --force --deep --sign - \
+            "tools/logic2-bridge/tauri-client/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app"
+
       - name: Verify application bundle
         run: |
           set -euo pipefail
@@ -435,6 +440,10 @@ jobs:
           file "$resources/tools/logic2-bridge/build/graph-host" \
             | grep -q "arm64"
           test -f "$resources/tools/logic2-bridge/compatibility/profiles.json"
+          test -f "$resources/tools/logic2-bridge/lib/macos-hook-locator.cjs"
+          test -f "$resources/tools/logic2-bridge/lib/offline-compatibility.cjs"
+          test -f "$resources/tools/logic2-bridge/lib/windows-hook-locator.cjs"
+          test -f "$resources/docs/graphserver-profile-manual.md"
           test -f "$resources/tools/logic2-bridge/extensions/qmi8660/extension.json"
           test -f "$resources/tools/logic2-bridge/extensions/qmi8660/HighLevelAnalyzer.py"
           test -f "$resources/tools/logic2-bridge/extensions/qmi8660/qmi8660_decode.py"
@@ -454,6 +463,7 @@ jobs:
           test -f "$resources/resources/bitstreams/hspi_ddr.bin"
           test -f "$resources/resources/bitstreams/hspi_ddr_RST.bin"
           test -f "$resources/resources/firmware/SCI_LOGIC.bin"
+          codesign --verify --deep --strict --verbose=2 "$app_root"
 
       - name: Archive portable application
         run: |
@@ -567,6 +577,19 @@ jobs:
           source_appimage="$(find tools/logic2-bridge/tauri-client/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage \
             -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
           test -n "$source_appimage"
+          extract_root="$(mktemp -d)"
+          (
+            cd "$extract_root"
+            "$GITHUB_WORKSPACE/$source_appimage" --appimage-extract >/dev/null
+          )
+          test -n "$(find "$extract_root/squashfs-root" -type f \
+            -path '*/lib/macos-hook-locator.cjs' -print -quit)"
+          test -n "$(find "$extract_root/squashfs-root" -type f \
+            -path '*/lib/offline-compatibility.cjs' -print -quit)"
+          test -n "$(find "$extract_root/squashfs-root" -type f \
+            -path '*/lib/windows-hook-locator.cjs' -print -quit)"
+          test -n "$(find "$extract_root/squashfs-root" -type f \
+            -path '*/docs/graphserver-profile-manual.md' -print -quit)"
           mkdir -p dist
           install -m 755 "$source_appimage" "dist/PXLogic-Bridge-linux-x86_64.AppImage"
           tar -C dist -czf "dist/pxlogic-logic2-bridge-linux-x64.tar.gz" \
@@ -674,6 +697,7 @@ jobs:
             (Join-Path $bridge 'extensions/qmi8658'), `
             (Join-Path $bridge 'extensions/qma6100p'), `
             (Join-Path $bridge 'build'), `
+            (Join-Path $stage 'docs'), `
             (Join-Path $stage 'target/release'), `
             (Join-Path $stage 'resources/bitstreams'), `
             (Join-Path $stage 'resources/firmware') | Out-Null
@@ -684,6 +708,8 @@ jobs:
           Copy-Item 'tools/logic2-bridge/lib/*' (Join-Path $bridge 'lib') -Recurse
           Copy-Item 'tools/logic2-bridge/compatibility/*' `
             (Join-Path $bridge 'compatibility') -Recurse
+          Copy-Item 'docs/graphserver-profile-manual.md' `
+            (Join-Path $stage 'docs/graphserver-profile-manual.md')
           Copy-Item 'tools/logic2-bridge/extensions/qmi8660/extension.json' `
             (Join-Path $bridge 'extensions/qmi8660/extension.json')
           Copy-Item 'tools/logic2-bridge/extensions/qmi8660/HighLevelAnalyzer.py' `
@@ -728,7 +754,11 @@ jobs:
           $required = @(
             (Join-Path $stage 'PXLogic Bridge.exe'),
             (Join-Path $bridge 'index.cjs'),
+            (Join-Path $bridge 'lib/macos-hook-locator.cjs'),
+            (Join-Path $bridge 'lib/offline-compatibility.cjs'),
+            (Join-Path $bridge 'lib/windows-hook-locator.cjs'),
             (Join-Path $bridge 'build/graph-host.exe'),
+            (Join-Path $stage 'docs/graphserver-profile-manual.md'),
             (Join-Path $bridge 'extensions/qmi8660/extension.json'),
             (Join-Path $bridge 'extensions/qmi8660/HighLevelAnalyzer.py'),
             (Join-Path $bridge 'extensions/qmi8660/qmi8660_decode.py'),

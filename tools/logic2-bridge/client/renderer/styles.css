@@ -165,6 +165,12 @@ main {
   margin-bottom: 15px;
 }
 
+.heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 label {
   display: block;
   margin-bottom: 7px;
@@ -284,7 +290,8 @@ select:focus {
   gap: 22px;
 }
 
-.hardware-controls select {
+.hardware-controls select,
+.hardware-controls input {
   width: 100%;
 }
 
@@ -389,6 +396,50 @@ footer {
 footer p {
   color: #6b7078;
   font-size: 12px;
+}
+
+.warning-dialog {
+  width: min(520px, calc(100vw - 48px));
+  padding: 22px;
+  color: #202124;
+  background: #ffffff;
+  border: 1px solid #c9ccd2;
+  border-radius: 6px;
+  box-shadow: 0 16px 42px rgb(20 22 26 / 24%);
+}
+
+.warning-dialog::backdrop {
+  background: rgb(20 22 26 / 42%);
+}
+
+.warning-dialog h2,
+.warning-dialog p {
+  margin: 0;
+}
+
+.warning-dialog h2 {
+  color: #a03b2d;
+  font-size: 16px;
+}
+
+.warning-dialog p {
+  margin-top: 12px;
+  color: #565b63;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.dialog-actions .primary-button {
+  min-width: 76px;
+  margin-left: 0;
 }
 
 .primary-button {
