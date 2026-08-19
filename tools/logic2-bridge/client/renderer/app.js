@@ -238,6 +238,7 @@ function recoveryTitle(errorCode) {
     PXLOGIC_HELPER_START_FAILED: '采集进程启动失败',
     PXLOGIC_HELPER_EXITED: '采集进程异常退出',
     PXLOGIC_USB_REENUMERATED: 'USB 设备已重新连接',
+    GRAPH_ANALYZER_CLEANUP_CRASH: 'Logic 2 分析器清理异常',
     PXLOGIC_NOT_READY: 'PXLogic 尚未就绪',
     LOGIC_COMPATIBILITY: 'Logic 2 兼容性检查失败',
     BRIDGE_PROCESS_EXITED: 'Bridge 进程异常退出',

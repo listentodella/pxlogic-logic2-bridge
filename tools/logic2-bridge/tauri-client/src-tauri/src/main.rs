@@ -330,8 +330,20 @@ struct DiagnosticsReport {
     bridge_state: BridgeState,
     capture_telemetry: CaptureTelemetry,
     recent_logs: Vec<String>,
+    previous_session_logs: Vec<String>,
     graph_log_tail: Option<String>,
+    graph_host_crash_reports: Vec<CrashReportSnapshot>,
     local_compatibility_manifest: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashReportSnapshot {
+    path: String,
+    modified_at_unix_seconds: u64,
+    size_bytes: u64,
+    header: Option<serde_json::Value>,
+    report_tail: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -403,6 +415,7 @@ struct AppState {
     bridge_state: Mutex<BridgeState>,
     capture_telemetry: Mutex<CaptureTelemetry>,
     logs: Mutex<VecDeque<String>>,
+    previous_session_logs: Mutex<Vec<String>>,
     next_token: AtomicU64,
     quitting: AtomicBool,
 }
@@ -414,6 +427,7 @@ impl Default for AppState {
             bridge_state: Mutex::new(BridgeState::default()),
             capture_telemetry: Mutex::new(CaptureTelemetry::default()),
             logs: Mutex::new(VecDeque::new()),
+            previous_session_logs: Mutex::new(Vec::new()),
             next_token: AtomicU64::new(1),
             quitting: AtomicBool::new(false),
         }
@@ -1741,6 +1755,21 @@ fn capture_failure_message(code: &str) -> &'static str {
     }
 }
 
+fn is_graph_analyzer_cleanup_crash(line: &str) -> bool {
+    line.contains("simulation_provider.cpp:45")
+        && line.contains("removing an analyzer during a simulation")
+}
+
+fn graph_analyzer_cleanup_failure(actual_port: Option<u16>) -> BridgeState {
+    BridgeState {
+        phase: "recovery".to_string(),
+        actual_port,
+        message: "Logic 2 图形服务在采集中清理协议分析器时异常退出。PXLogic 设备通常未损坏；请重新初始化 Bridge，诊断信息已保留。".to_string(),
+        error_code: Some("GRAPH_ANALYZER_CLEANUP_CRASH".to_string()),
+        recovery_action: Some("restart-bridge".to_string()),
+    }
+}
+
 fn classify_start_failure(message: &str) -> (&'static str, &'static str) {
     let normalized = message.to_ascii_lowercase();
     if normalized.contains("graphserver")
@@ -1896,6 +1925,15 @@ fn append_log(app: &AppHandle, source: &str, line: &str) {
             },
         );
     }
+    if is_graph_analyzer_cleanup_crash(line) {
+        let actual_port = app
+            .state::<AppState>()
+            .bridge_state
+            .lock()
+            .ok()
+            .and_then(|state| state.actual_port);
+        update_bridge_state(app, graph_analyzer_cleanup_failure(actual_port));
+    }
 }
 
 fn parse_ready_port(line: &str) -> Option<u16> {
@@ -1947,7 +1985,19 @@ fn monitor_bridge(app: AppHandle, token: u64) {
         match result {
             Some(result) => {
                 let quitting = app.state::<AppState>().quitting.load(Ordering::Acquire);
+                let graph_analyzer_cleanup_crash = app
+                    .state::<AppState>()
+                    .logs
+                    .lock()
+                    .map(|logs| {
+                        logs.iter()
+                            .any(|line| is_graph_analyzer_cleanup_crash(line))
+                    })
+                    .unwrap_or(false);
                 match result {
+                    _ if graph_analyzer_cleanup_crash && !quitting => {
+                        update_bridge_state(&app, graph_analyzer_cleanup_failure(None))
+                    }
                     Ok(status) if status.success() || quitting => {
                         update_bridge_state(&app, BridgeState::default())
                     }
@@ -2399,8 +2449,17 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
         runtime.starting = false;
         runtime.child = Some(ManagedChild { token, pid, child });
     }
-    if let Ok(mut logs) = app.state::<AppState>().logs.lock() {
+    let previous_session_logs = if let Ok(mut logs) = app.state::<AppState>().logs.lock() {
+        let previous = logs.iter().cloned().collect::<Vec<_>>();
         logs.clear();
+        previous
+    } else {
+        Vec::new()
+    };
+    if !previous_session_logs.is_empty() {
+        if let Ok(mut previous) = app.state::<AppState>().previous_session_logs.lock() {
+            *previous = previous_session_logs;
+        }
     }
     append_log(
         app,
@@ -2500,6 +2559,60 @@ fn read_text_tail(path: &Path, max_bytes: usize) -> Option<String> {
     Some(String::from_utf8_lossy(&contents[begin..]).into_owned())
 }
 
+#[cfg(target_os = "macos")]
+fn recent_graph_host_crash_reports() -> Vec<CrashReportSnapshot> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    let directory = PathBuf::from(home).join("Library/Logs/DiagnosticReports");
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut reports = entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("graph-host-") && name.ends_with(".ips"))
+        })
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = entry.metadata().ok()?;
+            let modified_at_unix_seconds = metadata
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            let report_tail = read_text_tail(&path, 64 * 1024);
+            let header = fs::read_to_string(&path)
+                .ok()
+                .and_then(|contents| contents.lines().next().map(str::to_string))
+                .and_then(|line| serde_json::from_str(&line).ok());
+            Some(CrashReportSnapshot {
+                path: path.to_string_lossy().into_owned(),
+                modified_at_unix_seconds,
+                size_bytes: metadata.len(),
+                header,
+                report_tail,
+            })
+        })
+        .collect::<Vec<_>>();
+    reports.sort_by_key(|report| std::cmp::Reverse(report.modified_at_unix_seconds));
+    reports.truncate(3);
+    reports
+}
+
+#[cfg(not(target_os = "macos"))]
+fn recent_graph_host_crash_reports() -> Vec<CrashReportSnapshot> {
+    Vec::new()
+}
+
 fn diagnostics_report(app: &AppHandle) -> Result<DiagnosticsReport, String> {
     let settings = load_settings(app);
     let logic = inspect_logic_path(Some(app), Path::new(&settings.logic_app_path), false);
@@ -2523,6 +2636,12 @@ fn diagnostics_report(app: &AppHandle) -> Result<DiagnosticsReport, String> {
         .iter()
         .cloned()
         .collect();
+    let previous_session_logs = app
+        .state::<AppState>()
+        .previous_session_logs
+        .lock()
+        .map_err(|_| "上一 Bridge 会话日志状态已损坏".to_string())?
+        .clone();
     let graph_log_tail = bridge_log_directory()
         .ok()
         .and_then(|directory| read_text_tail(&directory.join("graphio.log"), 64 * 1024));
@@ -2535,7 +2654,7 @@ fn diagnostics_report(app: &AppHandle) -> Result<DiagnosticsReport, String> {
         .unwrap_or_default()
         .as_secs();
     Ok(DiagnosticsReport {
-        schema_version: 1,
+        schema_version: 2,
         generated_at_unix_seconds,
         client_version: app.package_info().version.to_string(),
         platform: std::env::consts::OS.to_string(),
@@ -2545,7 +2664,9 @@ fn diagnostics_report(app: &AppHandle) -> Result<DiagnosticsReport, String> {
         bridge_state,
         capture_telemetry,
         recent_logs,
+        previous_session_logs,
         graph_log_tail,
+        graph_host_crash_reports: recent_graph_host_crash_reports(),
         local_compatibility_manifest,
     })
 }
@@ -2883,6 +3004,23 @@ mod tests {
         assert!(message.contains("采集已安全停止"));
         assert!(message.contains("设备通常未损坏"));
         assert!(message.contains("USB 控制器、Hub 或设备重置"));
+    }
+
+    #[test]
+    fn classifies_the_graphserver_analyzer_cleanup_assertion() {
+        let line = "[main] [critical] [simulation_provider.cpp:45] Assert: TODO: add support for removing an analyzer during a simulation";
+        assert!(is_graph_analyzer_cleanup_crash(line));
+        assert!(!is_graph_analyzer_cleanup_crash(
+            "Direct message handler exception: Pipe with specified id does not exist"
+        ));
+        let state = graph_analyzer_cleanup_failure(Some(12472));
+        assert_eq!(state.phase, "recovery");
+        assert_eq!(state.actual_port, Some(12472));
+        assert_eq!(
+            state.error_code.as_deref(),
+            Some("GRAPH_ANALYZER_CLEANUP_CRASH")
+        );
+        assert!(state.message.contains("PXLogic 设备通常未损坏"));
     }
 
     #[test]

@@ -13,6 +13,10 @@ const {
   nativeImage,
   shell,
 } = require('electron');
+const {
+  classifyGraphServerFailure,
+  recentGraphHostCrashReports,
+} = require('../lib/diagnostics.cjs');
 
 const DEFAULT_SETTINGS = Object.freeze({
   logicAppPath: '',
@@ -34,6 +38,7 @@ let bridgeState = {
 };
 let captureTelemetry = defaultCaptureTelemetry();
 let logLines = [];
+let previousSessionLogLines = [];
 let quitting = false;
 
 function bridgeRoot() {
@@ -332,6 +337,15 @@ function appendLog(source, chunk) {
         recoveryAction: event.recoveryAction || 'restart-bridge',
       });
     }
+    const graphFailure = classifyGraphServerFailure(line);
+    if (graphFailure) {
+      setBridgeState({
+        phase: 'recovery',
+        message: graphFailure.message,
+        errorCode: graphFailure.code,
+        recoveryAction: graphFailure.recoveryAction,
+      });
+    }
     const match = line.match(/Graph WebSocket ready: ws:\/\/127\.0\.0\.1:(\d+)\/saleae/);
     if (match) {
       setBridgeState({
@@ -372,6 +386,7 @@ function startBridge(rawSettings) {
   });
   captureTelemetry = defaultCaptureTelemetry();
   emit('bridge:telemetry', { ...captureTelemetry });
+  if (logLines.length) previousSessionLogLines = [...logLines];
   logLines = [];
   bridgeProcess = spawn(process.execPath, args, {
     cwd: bridgeRoot(),
@@ -393,6 +408,16 @@ function startBridge(rawSettings) {
   });
   bridgeProcess.once('exit', (code, signal) => {
     bridgeProcess = undefined;
+    const graphFailure = classifyGraphServerFailure(logLines);
+    if (graphFailure && !quitting) {
+      setBridgeState({
+        phase: 'recovery', actualPort: null,
+        message: graphFailure.message,
+        errorCode: graphFailure.code,
+        recoveryAction: graphFailure.recoveryAction,
+      });
+      return;
+    }
     const failed = code !== 0 && !quitting;
     setBridgeState({
       phase: failed ? 'error' : 'stopped',
@@ -455,7 +480,7 @@ async function exportDiagnostics() {
     app.getPath('home'), 'Library', 'Application Support', 'PXLogic', 'logic2-bridge',
   );
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAtUnixSeconds,
     clientVersion: app.getVersion(),
     platform: process.platform,
@@ -465,7 +490,9 @@ async function exportDiagnostics() {
     bridgeState,
     captureTelemetry,
     recentLogs: logLines,
+    previousSessionLogs: previousSessionLogLines,
     graphLogTail: readTextTail(path.join(logDirectory, 'graphio.log')),
+    graphHostCrashReports: recentGraphHostCrashReports(app.getPath('home')),
   };
   fs.writeFileSync(result.filePath, `${JSON.stringify(report, null, 2)}\n`);
   return result.filePath;

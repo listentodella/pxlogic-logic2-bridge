@@ -281,8 +281,10 @@ startup.
 
 The desktop client's `导出诊断` action writes a local JSON report containing
 the selected settings, Logic fingerprint result, compatibility cache, current
-Bridge state, recent runtime logs, and the tail of `graphio.log`. The report is
-created only at the path selected by the user and is never uploaded.
+Bridge state, current and previous-session runtime logs, and the tail of
+`graphio.log`. On macOS, schema version 2 also includes snapshots of the three
+most recent `graph-host` crash reports. The report is created only at the path
+selected by the user and is never uploaded.
 
 Capture helper failures are classified with stable error codes. A rate,
 channel-mapping, conversion, helper-start, or helper-exit failure changes the
@@ -290,6 +292,12 @@ client to a recovery-required state. `重新初始化 Bridge` first stops the cu
 Bridge process, waits for it to exit, and only then starts a fresh process that
 performs the one-time FPGA prepare again. No automatic hardware reconfiguration
 is attempted after a capture failure.
+
+A confirmed USB address change is reported separately as
+`PXLOGIC_USB_REENUMERATED`, with guidance that a USB controller, hub, or device
+reset usually does not mean the hardware is damaged. The Logic 2 GraphServer
+analyzer-cleanup assertion is classified as `GRAPH_ANALYZER_CLEANUP_CRASH`
+rather than a generic PXLogic capture-process exit.
 
 `--dry-run` validates the app version, GraphServer resources, PXLogic helper,
 firmware, bitstreams, and native host build without launching Logic:
