@@ -108,6 +108,10 @@ function needsRecovery() {
   return currentState.phase === 'recovery';
 }
 
+function needsUsbReconnectRecovery() {
+  return needsRecovery() && currentState.recoveryAction === 'rescan-and-restart';
+}
+
 function selectedHardwareDevice() {
   const selectedId = currentHardware?.selectedDeviceId || elements.pxlogicDevice.value;
   return currentHardware?.devices?.find(device => device.id === selectedId) || null;
@@ -202,8 +206,9 @@ function renderReadiness() {
 
 function renderFooterMessage() {
   if (needsRecovery()) {
-    elements.footerMessage.textContent =
-      '当前采集已安全锁定；重新初始化会停止 Bridge 并重新准备 PXLogic';
+    elements.footerMessage.textContent = needsUsbReconnectRecovery()
+      ? 'USB 设备已重新连接，采集已安全停止；重新扫描并初始化后即可继续'
+      : '当前采集已安全锁定；重新初始化会停止 Bridge 并重新准备 PXLogic';
     return;
   }
   if (currentState.phase === 'error') {
@@ -232,6 +237,7 @@ function recoveryTitle(errorCode) {
     PXLOGIC_CONVERSION_FAILED: '数据转换失败',
     PXLOGIC_HELPER_START_FAILED: '采集进程启动失败',
     PXLOGIC_HELPER_EXITED: '采集进程异常退出',
+    PXLOGIC_USB_REENUMERATED: 'USB 设备已重新连接',
     PXLOGIC_NOT_READY: 'PXLogic 尚未就绪',
     LOGIC_COMPATIBILITY: 'Logic 2 兼容性检查失败',
     BRIDGE_PROCESS_EXITED: 'Bridge 进程异常退出',
@@ -354,15 +360,17 @@ function renderState(state) {
   elements.endpointLabel.textContent = state.actualPort
     ? `WebSocket 127.0.0.1:${state.actualPort}`
     : 'WebSocket --';
-  elements.startButton.textContent = needsRecovery()
-    ? '重新初始化 Bridge'
-    : isActive()
-      ? '停止 Bridge'
-      : currentInspection?.supported
-        ? '启动 Logic 2'
-        : currentInspection?.runnable
-          ? '启动实验验证'
-          : '启动 Logic 2';
+  if (needsUsbReconnectRecovery()) {
+    elements.startButton.textContent = '重新扫描并初始化';
+  } else if (needsRecovery()) {
+    elements.startButton.textContent = '重新初始化 Bridge';
+  } else if (isActive()) {
+    elements.startButton.textContent = '停止 Bridge';
+  } else if (currentInspection?.runnable && !currentInspection.supported) {
+    elements.startButton.textContent = '启动实验验证';
+  } else {
+    elements.startButton.textContent = '启动 Logic 2';
+  }
   elements.startButton.classList.toggle('stop', isActive() && !needsRecovery());
   const disableSettings = isActive();
   elements.logicPath.disabled = disableSettings || logicAnalyzing;
@@ -370,8 +378,9 @@ function renderState(state) {
   elements.browseButton.disabled = disableSettings || logicAnalyzing;
   elements.analyzeButton.disabled = disableSettings || logicAnalyzing ||
     !elements.logicPath.value.trim();
-  elements.pxlogicRescanButton.disabled = disableSettings || hardwareScanning;
-  elements.pxlogicDevice.disabled = disableSettings || hardwareScanning ||
+  const disableHardwareSelection = disableSettings && !needsUsbReconnectRecovery();
+  elements.pxlogicRescanButton.disabled = disableHardwareSelection || hardwareScanning;
+  elements.pxlogicDevice.disabled = disableHardwareSelection || hardwareScanning ||
     !currentHardware?.devices?.length;
   elements.pxlogicThreshold.disabled = disableSettings;
   elements.thresholdReference.disabled = disableSettings;
@@ -742,6 +751,22 @@ elements.startButton.addEventListener('click', async () => {
     if (isActive()) {
       if (needsRecovery()) {
         if (typeof api.restart !== 'function') throw new Error('当前客户端不支持安全重新初始化');
+        if (needsUsbReconnectRecovery()) {
+          const previousDeviceId = elements.pxlogicDevice.value;
+          rememberThresholdProfile(previousDeviceId);
+          hardwareScanning = true;
+          renderState(currentState);
+          const hardware = await api.scanHardware(previousDeviceId);
+          renderHardware(hardware);
+          if (!isHardwareReady()) {
+            throw new Error(hardware?.error || '重新扫描后 PXLogic 设备仍未就绪');
+          }
+          await api.saveSettings(readSettings());
+          appendLog(
+            `[client] USB 设备重新扫描完成: ${previousDeviceId || '未知地址'} -> ` +
+            `${elements.pxlogicDevice.value}`,
+          );
+        }
         const state = await api.restart(readSettings());
         renderState(state);
       } else {
@@ -756,6 +781,9 @@ elements.startButton.addEventListener('click', async () => {
     const message = errorMessage(error);
     appendLog(`[client] ${message}`);
     elements.footerMessage.textContent = message;
+  } finally {
+    hardwareScanning = false;
+    renderState(currentState);
   }
 });
 

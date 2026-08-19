@@ -1736,6 +1736,7 @@ fn capture_failure_message(code: &str) -> &'static str {
         "PXLOGIC_CONVERSION_FAILED" => "PXLogic 数据转换失败",
         "PXLOGIC_HELPER_START_FAILED" => "PXLogic 采集进程无法启动",
         "PXLOGIC_HELPER_EXITED" => "PXLogic 采集进程异常退出",
+        "PXLOGIC_USB_REENUMERATED" => "检测到 PXLogic 的 USB 地址发生变化，常见于电脑 USB 控制器、Hub 或设备重置。采集已安全停止，设备通常未损坏。请重新扫描并初始化 Bridge。",
         _ => "PXLogic 采集失败",
     }
 }
@@ -2874,6 +2875,14 @@ mod tests {
             classify_start_failure("unexpected spawn failure"),
             ("BRIDGE_START_FAILED", "export-diagnostics")
         );
+    }
+
+    #[test]
+    fn reassures_users_after_confirmed_usb_reenumeration() {
+        let message = capture_failure_message("PXLOGIC_USB_REENUMERATED");
+        assert!(message.contains("采集已安全停止"));
+        assert!(message.contains("设备通常未损坏"));
+        assert!(message.contains("USB 控制器、Hub 或设备重置"));
     }
 
     #[test]

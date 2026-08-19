@@ -121,6 +121,85 @@ function buildPxlogicPrepareArguments(options) {
   return helperArguments;
 }
 
+function parseUsbDeviceId(deviceId) {
+  const match = String(deviceId || '').match(
+    /^usb:([0-9a-f]{4}):([0-9a-f]{4}):(\d+):(\d+)$/i,
+  );
+  if (!match) return null;
+  return {
+    vid: Number.parseInt(match[1], 16),
+    pid: Number.parseInt(match[2], 16),
+    bus: Number(match[3]),
+    address: Number(match[4]),
+  };
+}
+
+function classifyPxlogicHelperExit(deviceId, code, devices = []) {
+  const previous = parseUsbDeviceId(deviceId);
+  if (previous && !devices.some(device => device.id === deviceId)) {
+    const replacements = devices.filter(device =>
+      device.ready === true &&
+      Number(device.vid) === previous.vid &&
+      Number(device.pid) === previous.pid &&
+      device.id !== deviceId,
+    );
+    if (replacements.length === 1) {
+      const replacement = replacements[0];
+      return {
+        code: 'PXLOGIC_USB_REENUMERATED',
+        detail: `USB device changed address from ${deviceId} to ${replacement.id}`,
+        recoveryAction: 'rescan-and-restart',
+      };
+    }
+  }
+  return { code: 'PXLOGIC_HELPER_EXITED', detail: `helper exited with code ${code}` };
+}
+
+function scanPxlogicDevices(options) {
+  return new Promise((resolve, reject) => {
+    const scanner = spawn(options.pxlogicHelper, ['--list-json'], {
+      cwd: path.dirname(options.pxlogicHelper),
+      env: {
+        ...process.env,
+        PXLOGIC_BITSTREAM_DIR: options.bitstreams,
+        PXLOGIC_MCU_FIRMWARE: options.firmware,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: process.platform === 'win32',
+    });
+    let stdout = '';
+    let stderr = '';
+    scanner.stdout.setEncoding('utf8');
+    scanner.stderr.setEncoding('utf8');
+    scanner.stdout.on('data', chunk => { stdout += chunk; });
+    scanner.stderr.on('data', chunk => { stderr += chunk; });
+    scanner.once('error', reject);
+    scanner.once('close', code => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `device scan exited with code ${code}`));
+        return;
+      }
+      try {
+        const devices = JSON.parse(stdout);
+        if (!Array.isArray(devices)) throw new Error('device scan did not return an array');
+        resolve(devices);
+      } catch (error) {
+        reject(new Error(`invalid device scan response: ${error.message}`));
+      }
+    });
+  });
+}
+
+async function diagnosePxlogicHelperExit(options, code) {
+  try {
+    const devices = await scanPxlogicDevices(options);
+    return classifyPxlogicHelperExit(options.pxlogicDevice, code, devices);
+  } catch (error) {
+    console.error(`[logic2-bridge:pxlogic] post-exit USB scan failed: ${error.message}`);
+    return classifyPxlogicHelperExit(options.pxlogicDevice, code);
+  }
+}
+
 function preparePxlogicDevice(options) {
   requirePath(options.pxlogicHelper, 'PXLogic USB helper');
   requirePath(options.bitstreams, 'PXLogic bitstream directory');
@@ -327,7 +406,7 @@ function startPxlogicFeeder(options, host, captureSettings) {
     console.error(`[logic2-bridge:pxlogic] helper failed to start: ${error.message}`);
     if (host.exitCode === null) host.kill('SIGTERM');
   });
-  helper.once('close', code => {
+  helper.once('close', async code => {
     host.stdin.removeListener('drain', resumeStdout);
     if (!host.stdin.destroyed) {
       host.stdin.write(createInjectionFrame(INJECTION_FRAME.END));
@@ -336,7 +415,7 @@ function startPxlogicFeeder(options, host, captureSettings) {
       `[logic2-bridge:pxlogic] helper exited code=${code} chunks=${crossChunks} bytes=${convertedBytes}`,
     );
     if (!stopRequested && code !== 0 && !failure) {
-      failure = { code: 'PXLOGIC_HELPER_EXITED', detail: `helper exited with code ${code}` };
+      failure = await diagnosePxlogicHelperExit(options, code);
     }
     emitBridgeEvent({
       type: 'capture-ended',
@@ -498,7 +577,7 @@ class PxlogicCaptureController {
           type: 'capture-unavailable',
           code: result.failure.code,
           detail: result.failure.detail,
-          recoveryAction: 'restart-bridge',
+          recoveryAction: result.failure.recoveryAction || 'restart-bridge',
         });
       }
       if (this.activeFeeder === feeder) {
@@ -544,6 +623,7 @@ module.exports = {
   bridgeEventLine,
   buildPxlogicHelperArguments,
   buildPxlogicPrepareArguments,
+  classifyPxlogicHelperExit,
   createLineReader,
   describeDigitalTrigger,
   emitBridgeEvent,
