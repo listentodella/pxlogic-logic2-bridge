@@ -1708,6 +1708,41 @@ struct BridgePayload {
     firmware: PathBuf,
 }
 
+const BRIDGE_NODE_RUNTIME_FILES: &[&str] = &[
+    "index.cjs",
+    "lib/capture-controller.cjs",
+    "lib/compatibility.cjs",
+    "lib/diagnostics.cjs",
+    "lib/graph-action-guard.cjs",
+    "lib/logic-format.cjs",
+    "lib/macos-hook-locator.cjs",
+    "lib/offline-compatibility.cjs",
+    "lib/websocket-proxy.cjs",
+    "lib/windows-hook-locator.cjs",
+    "compatibility/profiles.json",
+];
+
+fn bridge_payload_required_paths(
+    root: &Path,
+    native_host: &Path,
+    helper: &Path,
+    bitstreams: &Path,
+    firmware: &Path,
+) -> Vec<PathBuf> {
+    let mut required = BRIDGE_NODE_RUNTIME_FILES
+        .iter()
+        .map(|relative| root.join(relative))
+        .collect::<Vec<_>>();
+    required.extend([
+        native_host.to_path_buf(),
+        helper.to_path_buf(),
+        bitstreams.join("hspi_ddr.bin"),
+        bitstreams.join("hspi_ddr_RST.bin"),
+        firmware.to_path_buf(),
+    ]);
+    required
+}
+
 fn validate_bridge_payload(app: &AppHandle) -> Result<BridgePayload, String> {
     let root = bridge_root(app)?;
     let payload_root = root
@@ -1728,22 +1763,8 @@ fn validate_bridge_payload(app: &AppHandle) -> Result<BridgePayload, String> {
         });
     let bitstreams = payload_root.join("resources/bitstreams");
     let firmware = payload_root.join("resources/firmware/SCI_LOGIC.bin");
-    let required = [
-        root.join("index.cjs"),
-        root.join("lib/capture-controller.cjs"),
-        root.join("lib/compatibility.cjs"),
-        root.join("lib/logic-format.cjs"),
-        root.join("lib/macos-hook-locator.cjs"),
-        root.join("lib/offline-compatibility.cjs"),
-        root.join("lib/websocket-proxy.cjs"),
-        root.join("lib/windows-hook-locator.cjs"),
-        root.join("compatibility/profiles.json"),
-        native_host,
-        helper.clone(),
-        bitstreams.join("hspi_ddr.bin"),
-        bitstreams.join("hspi_ddr_RST.bin"),
-        firmware.clone(),
-    ];
+    let required =
+        bridge_payload_required_paths(&root, &native_host, &helper, &bitstreams, &firmware);
     for path in required {
         if !path.is_file() {
             return Err(format!(
@@ -3266,6 +3287,20 @@ mod tests {
             .profiles
             .iter()
             .any(|profile| profile.id == "logic-2.4.46-macos-arm64-0df17631"));
+    }
+
+    #[test]
+    fn bridge_payload_contract_covers_direct_node_dependencies() {
+        assert!(BRIDGE_NODE_RUNTIME_FILES.contains(&"lib/diagnostics.cjs"));
+        assert!(BRIDGE_NODE_RUNTIME_FILES.contains(&"lib/graph-action-guard.cjs"));
+
+        let bridge_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in BRIDGE_NODE_RUNTIME_FILES {
+            assert!(
+                bridge_root.join(relative).is_file(),
+                "Bridge payload contract references missing source file: {relative}"
+            );
+        }
     }
 
     #[test]

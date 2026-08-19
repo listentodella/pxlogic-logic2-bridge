@@ -534,6 +534,8 @@ jobs:
           test -f "$resources/tools/logic2-bridge/compatibility/profiles.json"
           test -f "$resources/tools/logic2-bridge/lib/macos-hook-locator.cjs"
           test -f "$resources/tools/logic2-bridge/lib/offline-compatibility.cjs"
+          test -f "$resources/tools/logic2-bridge/lib/diagnostics.cjs"
+          test -f "$resources/tools/logic2-bridge/lib/graph-action-guard.cjs"
           test -f "$resources/tools/logic2-bridge/lib/windows-hook-locator.cjs"
           test -f "$resources/docs/graphserver-profile-manual.md"
           file "$resources/target/release/usb_smoke" \
