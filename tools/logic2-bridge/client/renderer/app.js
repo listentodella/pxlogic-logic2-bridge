@@ -14,7 +14,9 @@ function createTauriApi() {
     browseLogicApp: () => invoke('logic_browse'),
     scanHardware: preferredDeviceId => invoke('pxlogic_scan', { preferredDeviceId }),
     start: settings => invoke('bridge_start', { settings }),
+    restart: settings => invoke('bridge_restart', { settings }),
     stop: () => invoke('bridge_stop'),
+    exportDiagnostics: () => invoke('diagnostics_export'),
     openLogs: () => invoke('logs_open'),
     openManual: () => invoke('manual_open'),
     onState: callback => void listen('bridge-state', event => callback(event.payload)),
@@ -63,6 +65,11 @@ const elements = {
   screenQuadrant: document.querySelector('#screen-quadrant'),
   endpointLabel: document.querySelector('#endpoint-label'),
   logOutput: document.querySelector('#log-output'),
+  recoveryPanel: document.querySelector('#recovery-panel'),
+  recoveryTitle: document.querySelector('#recovery-title'),
+  recoveryMessage: document.querySelector('#recovery-message'),
+  recoveryCode: document.querySelector('#recovery-code'),
+  exportDiagnosticsButton: document.querySelector('#export-diagnostics-button'),
   openLogsButton: document.querySelector('#open-logs-button'),
   footerMessage: document.querySelector('#footer-message'),
   startButton: document.querySelector('#start-button'),
@@ -78,7 +85,11 @@ let inspectionSequence = 0;
 const warnedCompatibilityFingerprints = new Set();
 
 function isActive() {
-  return ['starting', 'running', 'stopping'].includes(currentState.phase);
+  return ['starting', 'running', 'stopping', 'recovery'].includes(currentState.phase);
+}
+
+function needsRecovery() {
+  return currentState.phase === 'recovery';
 }
 
 function selectedHardwareDevice() {
@@ -165,6 +176,11 @@ function renderReadiness() {
 }
 
 function renderFooterMessage() {
+  if (needsRecovery()) {
+    elements.footerMessage.textContent =
+      '当前采集已安全锁定；重新初始化会停止 Bridge 并重新准备 PXLogic';
+    return;
+  }
   if (currentState.phase === 'error') {
     elements.footerMessage.textContent = currentState.message;
     return;
@@ -183,6 +199,34 @@ function renderFooterMessage() {
   }
 }
 
+function recoveryTitle(errorCode) {
+  const titles = {
+    PXLOGIC_RATE_MISMATCH: '采样率校验失败',
+    PXLOGIC_CHANNEL_MISMATCH: '通道校验失败',
+    PXLOGIC_CHANNEL_MAPPING_CHANGED: '通道映射发生变化',
+    PXLOGIC_CONVERSION_FAILED: '数据转换失败',
+    PXLOGIC_HELPER_START_FAILED: '采集进程启动失败',
+    PXLOGIC_HELPER_EXITED: '采集进程异常退出',
+    PXLOGIC_NOT_READY: 'PXLogic 尚未就绪',
+    LOGIC_COMPATIBILITY: 'Logic 2 兼容性检查失败',
+    BRIDGE_PROCESS_EXITED: 'Bridge 进程异常退出',
+    BRIDGE_STATUS_FAILED: 'Bridge 状态读取失败',
+    BRIDGE_START_FAILED: 'Bridge 启动失败',
+  };
+  return titles[errorCode] || 'Bridge 需要处理';
+}
+
+function renderRecoveryPanel() {
+  const visible = ['error', 'recovery'].includes(currentState.phase) &&
+    Boolean(currentState.errorCode || currentState.message);
+  elements.recoveryPanel.hidden = !visible;
+  if (!visible) return;
+  elements.recoveryTitle.textContent = recoveryTitle(currentState.errorCode);
+  elements.recoveryMessage.textContent = currentState.message;
+  elements.recoveryCode.textContent = currentState.errorCode || 'BRIDGE_ERROR';
+  elements.recoveryPanel.classList.toggle('recovery-required', needsRecovery());
+}
+
 function renderState(state) {
   currentState = state;
   elements.status.className = `status status-${state.phase}`;
@@ -190,14 +234,16 @@ function renderState(state) {
   elements.endpointLabel.textContent = state.actualPort
     ? `WebSocket 127.0.0.1:${state.actualPort}`
     : 'WebSocket --';
-  elements.startButton.textContent = isActive()
-    ? '停止 Bridge'
-    : currentInspection?.supported
-      ? '启动 Logic 2'
-      : currentInspection?.runnable
-        ? '启动实验验证'
-        : '启动 Logic 2';
-  elements.startButton.classList.toggle('stop', isActive());
+  elements.startButton.textContent = needsRecovery()
+    ? '重新初始化 Bridge'
+    : isActive()
+      ? '停止 Bridge'
+      : currentInspection?.supported
+        ? '启动 Logic 2'
+        : currentInspection?.runnable
+          ? '启动实验验证'
+          : '启动 Logic 2';
+  elements.startButton.classList.toggle('stop', isActive() && !needsRecovery());
   const disableSettings = isActive();
   elements.logicPath.disabled = disableSettings || logicAnalyzing;
   elements.rescanButton.disabled = disableSettings || logicAnalyzing;
@@ -218,6 +264,7 @@ function renderState(state) {
     (!disableSettings && (!currentInspection?.runnable || !isHardwareReady()));
   renderReadiness();
   renderFooterMessage();
+  renderRecoveryPanel();
 }
 
 function setPortMode(mode) {
@@ -474,6 +521,17 @@ elements.pxlogicRescanButton.addEventListener('click', async () => {
   }
 });
 elements.openLogsButton.addEventListener('click', () => api.openLogs());
+elements.exportDiagnosticsButton.addEventListener('click', async () => {
+  try {
+    if (typeof api.exportDiagnostics !== 'function') {
+      throw new Error('当前客户端不支持诊断导出');
+    }
+    const path = await api.exportDiagnostics();
+    if (path) appendLog(`[client] 诊断已导出: ${path}`);
+  } catch (error) {
+    appendLog(`[client] ${errorMessage(error)}`);
+  }
+});
 elements.openManualButton.addEventListener('click', async () => {
   try {
     if (typeof api.openManual !== 'function') throw new Error('当前客户端未包含手工指南入口');
@@ -488,7 +546,13 @@ elements.closeWarningButton.addEventListener('click', () => {
 elements.startButton.addEventListener('click', async () => {
   try {
     if (isActive()) {
-      await api.stop();
+      if (needsRecovery()) {
+        if (typeof api.restart !== 'function') throw new Error('当前客户端不支持安全重新初始化');
+        const state = await api.restart(readSettings());
+        renderState(state);
+      } else {
+        await api.stop();
+      }
     } else {
       if (!elements.pxlogicThreshold.reportValidity()) return;
       const state = await api.start(readSettings());
@@ -506,6 +570,7 @@ api.onLog(appendLog);
 
 async function initialize() {
   if (typeof api.analyzeLogicApp !== 'function') elements.analyzeButton.hidden = true;
+  if (typeof api.exportDiagnostics !== 'function') elements.exportDiagnosticsButton.hidden = true;
   const initial = await api.initialState();
   renderApplications(initial.applications);
   elements.logicPath.value = initial.settings.logicAppPath;

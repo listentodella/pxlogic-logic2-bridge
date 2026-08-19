@@ -27,6 +27,14 @@ function createLineReader(stream, onLine) {
   });
 }
 
+function bridgeEventLine(event) {
+  return `[logic2-bridge:event] ${JSON.stringify(event)}`;
+}
+
+function emitBridgeEvent(event) {
+  console.error(bridgeEventLine(event));
+}
+
 function parseThresholdVolts(description) {
   const match = String(description ?? '').match(/[-+]?(?:\d+(?:\.\d*)?|\.\d+)/);
   if (!match) return undefined;
@@ -182,7 +190,7 @@ function startPxlogicFeeder(options, host, captureSettings) {
   });
 
   let stopRequested = false;
-  let helperFailed = false;
+  let failure;
   let stdoutPaused = false;
   let printedCaptureSettings = false;
   let printedProfile = false;
@@ -222,21 +230,17 @@ function startPxlogicFeeder(options, host, captureSettings) {
       const effectiveRate = metadata.sample_rate_hz || sampleRateHz;
       const effectiveChannels = metadata.enabled_channels || enabledChannels;
       if (effectiveRate !== sampleRateHz) {
-        helperFailed = true;
-        console.error(
-          `[logic2-bridge:pxlogic] refusing rate mismatch: Logic=${sampleRateHz} Hz, ` +
-          `PXLogic=${effectiveRate} Hz`,
-        );
+        const detail = `Logic=${sampleRateHz} Hz, PXLogic=${effectiveRate} Hz`;
+        failure = { code: 'PXLOGIC_RATE_MISMATCH', detail };
+        console.error(`[logic2-bridge:pxlogic] refusing rate mismatch: ${detail}`);
         if (helper.exitCode === null) helper.kill('SIGTERM');
         return;
       }
       if (effectiveChannels.length !== enabledChannels.length ||
           effectiveChannels.some((channel, index) => channel !== enabledChannels[index])) {
-        helperFailed = true;
-        console.error(
-          `[logic2-bridge:pxlogic] refusing channel mismatch: expected ` +
-          `${enabledChannels.join(',')}, received ${effectiveChannels.join(',')}`,
-        );
+        const detail = `expected ${enabledChannels.join(',')}, received ${effectiveChannels.join(',')}`;
+        failure = { code: 'PXLOGIC_CHANNEL_MISMATCH', detail };
+        console.error(`[logic2-bridge:pxlogic] refusing channel mismatch: ${detail}`);
         if (helper.exitCode === null) helper.kill('SIGTERM');
         return;
       }
@@ -259,7 +263,10 @@ function startPxlogicFeeder(options, host, captureSettings) {
     const eventChannels = event.enabledChannels || enabledChannels;
     if (eventChannels.length !== enabledChannels.length ||
         eventChannels.some((channel, index) => channel !== enabledChannels[index])) {
-      helperFailed = true;
+      failure = {
+        code: 'PXLOGIC_CHANNEL_MAPPING_CHANGED',
+        detail: 'cross chunk channel mapping changed during capture',
+      };
       console.error('[logic2-bridge:pxlogic] cross chunk channel mapping changed during capture');
       if (helper.exitCode === null) helper.kill('SIGTERM');
       return;
@@ -282,7 +289,7 @@ function startPxlogicFeeder(options, host, captureSettings) {
         );
       }
     } catch (error) {
-      helperFailed = true;
+      failure = { code: 'PXLOGIC_CONVERSION_FAILED', detail: error.message };
       console.error(`[logic2-bridge:pxlogic] conversion failed: ${error.message}`);
       if (helper.exitCode === null) helper.kill('SIGTERM');
     }
@@ -292,7 +299,7 @@ function startPxlogicFeeder(options, host, captureSettings) {
     console.error(`[logic2-bridge:pxlogic-helper] ${line}`);
   });
   helper.once('error', error => {
-    helperFailed = true;
+    failure = { code: 'PXLOGIC_HELPER_START_FAILED', detail: error.message };
     console.error(`[logic2-bridge:pxlogic] helper failed to start: ${error.message}`);
     if (host.exitCode === null) host.kill('SIGTERM');
   });
@@ -304,8 +311,10 @@ function startPxlogicFeeder(options, host, captureSettings) {
     console.error(
       `[logic2-bridge:pxlogic] helper exited code=${code} chunks=${crossChunks} bytes=${convertedBytes}`,
     );
-    if (!stopRequested && code !== 0) helperFailed = true;
-    resolveDone({ code, failed: helperFailed });
+    if (!stopRequested && code !== 0 && !failure) {
+      failure = { code: 'PXLOGIC_HELPER_EXITED', detail: `helper exited with code ${code}` };
+    }
+    resolveDone({ code, failure });
   });
 
   console.error(
@@ -438,12 +447,18 @@ class PxlogicCaptureController {
     this.activeFeeder = feeder;
     this.activeSessionId = sessionId;
     feeder.done.then(result => {
-      if (result.failed) {
-        this.captureUnavailableReason = 'the PXLogic capture helper failed';
+      if (result.failure) {
+        this.captureUnavailableReason = result.failure.detail;
         console.error(
           '[logic2-bridge:control] PXLogic capture disabled for the rest of this Bridge session; ' +
           'automatic FPGA reconfiguration is intentionally blocked',
         );
+        emitBridgeEvent({
+          type: 'capture-unavailable',
+          code: result.failure.code,
+          detail: result.failure.detail,
+          recoveryAction: 'restart-bridge',
+        });
       }
       if (this.activeFeeder === feeder) {
         this.activeFeeder = null;
@@ -485,6 +500,7 @@ class PxlogicCaptureController {
 
 module.exports = {
   PxlogicCaptureController,
+  bridgeEventLine,
   buildPxlogicHelperArguments,
   buildPxlogicPrepareArguments,
   createLineReader,

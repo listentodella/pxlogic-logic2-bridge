@@ -149,7 +149,17 @@
             <h2>运行记录</h2>
             <p id="endpoint-label">WebSocket --</p>
           </div>
-          <button id="open-logs-button" class="quiet-button" type="button">打开日志目录</button>
+          <div class="activity-actions">
+            <button id="export-diagnostics-button" class="quiet-button" type="button">导出诊断</button>
+            <button id="open-logs-button" class="quiet-button" type="button">打开日志目录</button>
+          </div>
+        </div>
+        <div id="recovery-panel" class="recovery-panel" role="alert" hidden>
+          <div>
+            <strong id="recovery-title">Bridge 需要处理</strong>
+            <span id="recovery-message"></span>
+          </div>
+          <code id="recovery-code"></code>
         </div>
         <pre id="log-output" aria-live="polite">PXLogic Bridge 已就绪</pre>
       </section>

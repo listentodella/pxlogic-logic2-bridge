@@ -28,7 +28,9 @@ const MAX_PXLOGIC_THRESHOLD_VOLTS = 6.668;
 let mainWindow;
 let tray;
 let bridgeProcess;
-let bridgeState = { phase: 'stopped', actualPort: null, message: '待机' };
+let bridgeState = {
+  phase: 'stopped', actualPort: null, message: '待机', errorCode: null, recoveryAction: null,
+};
 let logLines = [];
 let quitting = false;
 
@@ -215,6 +217,28 @@ function setBridgeState(next) {
   refreshTrayMenu();
 }
 
+function parseBridgeRuntimeEvent(line) {
+  const prefix = '[logic2-bridge:event] ';
+  if (!line.startsWith(prefix)) return null;
+  try {
+    return JSON.parse(line.slice(prefix.length));
+  } catch {
+    return null;
+  }
+}
+
+function captureFailureMessage(code) {
+  const messages = {
+    PXLOGIC_RATE_MISMATCH: '实际采样率与 Logic 2 设置不一致',
+    PXLOGIC_CHANNEL_MISMATCH: '实际通道映射与 Logic 2 设置不一致',
+    PXLOGIC_CHANNEL_MAPPING_CHANGED: '实际通道映射与 Logic 2 设置不一致',
+    PXLOGIC_CONVERSION_FAILED: 'PXLogic 数据转换失败',
+    PXLOGIC_HELPER_START_FAILED: 'PXLogic 采集进程无法启动',
+    PXLOGIC_HELPER_EXITED: 'PXLogic 采集进程异常退出',
+  };
+  return messages[code] || 'PXLogic 采集失败';
+}
+
 function appendLog(source, chunk) {
   const lines = String(chunk).split(/\r?\n/).filter(Boolean);
   for (const line of lines) {
@@ -222,9 +246,21 @@ function appendLog(source, chunk) {
     logLines.push(entry);
     if (logLines.length > 500) logLines.shift();
     emit('bridge:log', entry);
+    const event = parseBridgeRuntimeEvent(line);
+    if (event?.type === 'capture-unavailable') {
+      setBridgeState({
+        phase: 'recovery',
+        message: captureFailureMessage(event.code),
+        errorCode: event.code,
+        recoveryAction: event.recoveryAction || 'restart-bridge',
+      });
+    }
     const match = line.match(/Graph WebSocket ready: ws:\/\/127\.0\.0\.1:(\d+)\/saleae/);
     if (match) {
-      setBridgeState({ phase: 'running', actualPort: Number(match[1]), message: '已连接' });
+      setBridgeState({
+        phase: 'running', actualPort: Number(match[1]), message: '已连接',
+        errorCode: null, recoveryAction: null,
+      });
     }
   }
 }
@@ -253,7 +289,10 @@ function startBridge(rawSettings) {
   ];
   if (settings.maximizeLogicWindow) args.push('--maximize-window');
   else args.push('--screen-quadrant', String(settings.screenQuadrant));
-  setBridgeState({ phase: 'starting', actualPort: null, message: '正在启动' });
+  setBridgeState({
+    phase: 'starting', actualPort: null, message: '正在启动',
+    errorCode: null, recoveryAction: null,
+  });
   logLines = [];
   bridgeProcess = spawn(process.execPath, args, {
     cwd: bridgeRoot(),
@@ -268,7 +307,10 @@ function startBridge(rawSettings) {
   bridgeProcess.once('error', error => {
     appendLog('error', error.message);
     bridgeProcess = undefined;
-    setBridgeState({ phase: 'error', actualPort: null, message: error.message });
+    setBridgeState({
+      phase: 'error', actualPort: null, message: error.message,
+      errorCode: 'BRIDGE_START_FAILED', recoveryAction: 'export-diagnostics',
+    });
   });
   bridgeProcess.once('exit', (code, signal) => {
     bridgeProcess = undefined;
@@ -277,6 +319,8 @@ function startBridge(rawSettings) {
       phase: failed ? 'error' : 'stopped',
       actualPort: null,
       message: failed ? `Bridge 已退出（${signal || `代码 ${code}`}）` : '待机',
+      errorCode: failed ? 'BRIDGE_PROCESS_EXITED' : null,
+      recoveryAction: failed ? 'export-diagnostics' : null,
     });
   });
   return { ...bridgeState };
@@ -284,9 +328,67 @@ function startBridge(rawSettings) {
 
 function stopBridge() {
   if (!bridgeProcess) return { ...bridgeState };
-  setBridgeState({ phase: 'stopping', message: '正在停止' });
+  setBridgeState({
+    phase: 'stopping', message: '正在停止', errorCode: null, recoveryAction: null,
+  });
   bridgeProcess.kill('SIGTERM');
   return { ...bridgeState };
+}
+
+async function restartBridge(settings) {
+  if (bridgeProcess) {
+    const processToStop = bridgeProcess;
+    const stopped = new Promise((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error('等待 Bridge 停止超时，请先退出后再重新启动')),
+        6000,
+      );
+      processToStop.once('exit', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    stopBridge();
+    await stopped;
+  }
+  return startBridge(settings);
+}
+
+function readTextTail(filePath, maxBytes = 64 * 1024) {
+  try {
+    const contents = fs.readFileSync(filePath);
+    return contents.subarray(Math.max(0, contents.length - maxBytes)).toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+async function exportDiagnostics() {
+  const generatedAtUnixSeconds = Math.floor(Date.now() / 1000);
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: '导出 PXLogic Bridge 诊断',
+    defaultPath: `pxlogic-bridge-diagnostics-${generatedAtUnixSeconds}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  const settings = loadSettings();
+  const logDirectory = path.join(
+    app.getPath('home'), 'Library', 'Application Support', 'PXLogic', 'logic2-bridge',
+  );
+  const report = {
+    schemaVersion: 1,
+    generatedAtUnixSeconds,
+    clientVersion: app.getVersion(),
+    platform: process.platform,
+    architecture: process.arch,
+    settings,
+    logic: inspectLogicApp(settings.logicAppPath),
+    bridgeState,
+    recentLogs: logLines,
+    graphLogTail: readTextTail(path.join(logDirectory, 'graphio.log')),
+  };
+  fs.writeFileSync(result.filePath, `${JSON.stringify(report, null, 2)}\n`);
+  return result.filePath;
 }
 
 function showWindow() {
@@ -384,7 +486,9 @@ ipcMain.handle('logic:browse', async () => {
   return inspectLogicApp(result.filePaths[0]);
 });
 ipcMain.handle('bridge:start', (_event, settings) => startBridge(settings));
+ipcMain.handle('bridge:restart', (_event, settings) => restartBridge(settings));
 ipcMain.handle('bridge:stop', () => stopBridge());
+ipcMain.handle('diagnostics:export', () => exportDiagnostics());
 ipcMain.handle('logs:open', () => {
   const logDirectory = path.join(app.getPath('home'), 'Library', 'Application Support', 'PXLogic', 'logic2-bridge');
   fs.mkdirSync(logDirectory, { recursive: true });

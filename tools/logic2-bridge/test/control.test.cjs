@@ -4,12 +4,25 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   PxlogicCaptureController,
+  bridgeEventLine,
   buildPxlogicHelperArguments,
   buildPxlogicPrepareArguments,
   describeDigitalTrigger,
   extractLogicRequests,
   parseThresholdVolts,
 } = require('../lib/capture-controller.cjs');
+
+test('serializes machine-readable bridge events for desktop recovery', () => {
+  assert.equal(
+    bridgeEventLine({
+      type: 'capture-unavailable',
+      code: 'PXLOGIC_HELPER_EXITED',
+      recoveryAction: 'restart-bridge',
+    }),
+    '[logic2-bridge:event] {"type":"capture-unavailable","code":' +
+      '"PXLOGIC_HELPER_EXITED","recoveryAction":"restart-bridge"}',
+  );
+});
 
 test('passes the Bridge hardware threshold to PXLogic without rescaling', () => {
   const arguments_ = buildPxlogicHelperArguments({

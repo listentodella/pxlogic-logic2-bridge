@@ -2,8 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(target_os = "linux")]
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::{HashSet, VecDeque},
     fs,
@@ -15,7 +13,7 @@ use std::{
         Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
     menu::MenuBuilder,
@@ -196,6 +194,8 @@ struct BridgeState {
     phase: String,
     actual_port: Option<u16>,
     message: String,
+    error_code: Option<String>,
+    recovery_action: Option<String>,
 }
 
 impl Default for BridgeState {
@@ -204,8 +204,38 @@ impl Default for BridgeState {
             phase: "stopped".to_string(),
             actual_port: None,
             message: "待机".to_string(),
+            error_code: None,
+            recovery_action: None,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeRuntimeEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    code: String,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    recovery_action: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticsReport {
+    schema_version: u32,
+    generated_at_unix_seconds: u64,
+    client_version: String,
+    platform: String,
+    architecture: String,
+    settings: ClientSettings,
+    logic: LogicInspection,
+    bridge_state: BridgeState,
+    recent_logs: Vec<String>,
+    graph_log_tail: Option<String>,
+    local_compatibility_manifest: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1593,6 +1623,43 @@ fn update_bridge_state(app: &AppHandle, next: BridgeState) {
     let _ = app.emit("bridge-state", next);
 }
 
+fn parse_bridge_runtime_event(line: &str) -> Option<BridgeRuntimeEvent> {
+    const PREFIX: &str = "[logic2-bridge:event] ";
+    serde_json::from_str(line.strip_prefix(PREFIX)?).ok()
+}
+
+fn capture_failure_message(code: &str) -> &'static str {
+    match code {
+        "PXLOGIC_RATE_MISMATCH" => "实际采样率与 Logic 2 设置不一致",
+        "PXLOGIC_CHANNEL_MISMATCH" | "PXLOGIC_CHANNEL_MAPPING_CHANGED" => {
+            "实际通道映射与 Logic 2 设置不一致"
+        }
+        "PXLOGIC_CONVERSION_FAILED" => "PXLogic 数据转换失败",
+        "PXLOGIC_HELPER_START_FAILED" => "PXLogic 采集进程无法启动",
+        "PXLOGIC_HELPER_EXITED" => "PXLogic 采集进程异常退出",
+        _ => "PXLogic 采集失败",
+    }
+}
+
+fn classify_start_failure(message: &str) -> (&'static str, &'static str) {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("graphserver")
+        || normalized.contains("logic 2")
+        || normalized.contains("profile")
+    {
+        ("LOGIC_COMPATIBILITY", "review-logic")
+    } else if normalized.contains("pxlogic")
+        || normalized.contains("firmware")
+        || normalized.contains("bitstream")
+        || normalized.contains("fpga")
+        || message.contains("设备")
+    {
+        ("PXLOGIC_NOT_READY", "rescan-hardware")
+    } else {
+        ("BRIDGE_START_FAILED", "export-diagnostics")
+    }
+}
+
 fn append_log(app: &AppHandle, source: &str, line: &str) {
     if line.is_empty() {
         return;
@@ -1605,6 +1672,37 @@ fn append_log(app: &AppHandle, source: &str, line: &str) {
         }
     }
     let _ = app.emit("bridge-log", &entry);
+    if let Some(event) = parse_bridge_runtime_event(line) {
+        if event.event_type == "capture-unavailable" {
+            let actual_port = app
+                .state::<AppState>()
+                .bridge_state
+                .lock()
+                .ok()
+                .and_then(|state| state.actual_port);
+            if let Some(detail) = event.detail.as_deref() {
+                let detail_entry = format!("[diagnostic] {}: {detail}", event.code);
+                if let Ok(mut logs) = app.state::<AppState>().logs.lock() {
+                    logs.push_back(detail_entry);
+                    while logs.len() > MAX_LOG_LINES {
+                        logs.pop_front();
+                    }
+                }
+            }
+            update_bridge_state(
+                app,
+                BridgeState {
+                    phase: "recovery".to_string(),
+                    actual_port,
+                    message: capture_failure_message(&event.code).to_string(),
+                    error_code: Some(event.code),
+                    recovery_action: event
+                        .recovery_action
+                        .or_else(|| Some("restart-bridge".to_string())),
+                },
+            );
+        }
+    }
     if let Some(port) = parse_ready_port(line) {
         update_bridge_state(
             app,
@@ -1612,6 +1710,8 @@ fn append_log(app: &AppHandle, source: &str, line: &str) {
                 phase: "running".to_string(),
                 actual_port: Some(port),
                 message: "已连接".to_string(),
+                error_code: None,
+                recovery_action: None,
             },
         );
     }
@@ -1676,6 +1776,8 @@ fn monitor_bridge(app: AppHandle, token: u64) {
                             phase: "error".to_string(),
                             actual_port: None,
                             message: format!("Bridge 已退出（{}）", describe_status(status)),
+                            error_code: Some("BRIDGE_PROCESS_EXITED".to_string()),
+                            recovery_action: Some("export-diagnostics".to_string()),
                         },
                     ),
                     Err(error) => update_bridge_state(
@@ -1684,6 +1786,8 @@ fn monitor_bridge(app: AppHandle, token: u64) {
                             phase: "error".to_string(),
                             actual_port: None,
                             message: format!("Bridge 状态读取失败: {error}"),
+                            error_code: Some("BRIDGE_STATUS_FAILED".to_string()),
+                            recovery_action: Some("export-diagnostics".to_string()),
                         },
                     ),
                 }
@@ -1777,6 +1881,8 @@ fn request_stop(app: &AppHandle) -> Result<BridgeState, String> {
         phase: "stopping".to_string(),
         actual_port: None,
         message: "正在停止".to_string(),
+        error_code: None,
+        recovery_action: None,
     };
     update_bridge_state(app, next.clone());
     terminate_process(pid, false)
@@ -1969,6 +2075,8 @@ async fn bridge_start(app: AppHandle, settings: ClientSettings) -> Result<Bridge
             phase: "starting".to_string(),
             actual_port: None,
             message: "正在启动".to_string(),
+            error_code: None,
+            recovery_action: None,
         },
     );
 
@@ -1978,12 +2086,15 @@ async fn bridge_start(app: AppHandle, settings: ClientSettings) -> Result<Bridge
             runtime.starting = false;
         }
         let message = result.as_ref().err().cloned().unwrap_or_default();
+        let (error_code, recovery_action) = classify_start_failure(&message);
         update_bridge_state(
             &app,
             BridgeState {
                 phase: "error".to_string(),
                 actual_port: None,
                 message,
+                error_code: Some(error_code.to_string()),
+                recovery_action: Some(recovery_action.to_string()),
             },
         );
     }
@@ -2123,6 +2234,45 @@ fn bridge_stop(app: AppHandle) -> Result<BridgeState, String> {
     request_stop(&app)
 }
 
+fn wait_for_bridge_stop(app: &AppHandle, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let process_stopped = app
+            .state::<AppState>()
+            .runtime
+            .lock()
+            .map_err(|_| "Bridge 进程状态已损坏".to_string())?
+            .child
+            .is_none();
+        let state_settled = app
+            .state::<AppState>()
+            .bridge_state
+            .lock()
+            .map_err(|_| "Bridge 状态已损坏".to_string())?
+            .phase
+            != "stopping";
+        if process_stopped && state_settled {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("等待 Bridge 停止超时，请先退出后再重新启动".to_string());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[tauri::command]
+async fn bridge_restart(app: AppHandle, settings: ClientSettings) -> Result<BridgeState, String> {
+    request_stop(&app)?;
+    let wait_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        wait_for_bridge_stop(&wait_app, Duration::from_secs(6))
+    })
+    .await
+    .map_err(|error| format!("Bridge 恢复任务失败: {error}"))??;
+    bridge_start(app, settings).await
+}
+
 fn bridge_log_directory() -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     {
@@ -2150,6 +2300,87 @@ fn bridge_log_directory() -> Result<PathBuf, String> {
     {
         Err("当前平台尚未实现日志目录定位".to_string())
     }
+}
+
+fn read_text_tail(path: &Path, max_bytes: usize) -> Option<String> {
+    let contents = fs::read(path).ok()?;
+    let begin = contents.len().saturating_sub(max_bytes);
+    Some(String::from_utf8_lossy(&contents[begin..]).into_owned())
+}
+
+fn diagnostics_report(app: &AppHandle) -> Result<DiagnosticsReport, String> {
+    let settings = load_settings(app);
+    let logic = inspect_logic_path(Some(app), Path::new(&settings.logic_app_path), false);
+    let bridge_state = app
+        .state::<AppState>()
+        .bridge_state
+        .lock()
+        .map_err(|_| "Bridge 状态已损坏".to_string())?
+        .clone();
+    let recent_logs = app
+        .state::<AppState>()
+        .logs
+        .lock()
+        .map_err(|_| "Bridge 日志状态已损坏".to_string())?
+        .iter()
+        .cloned()
+        .collect();
+    let graph_log_tail = bridge_log_directory()
+        .ok()
+        .and_then(|directory| read_text_tail(&directory.join("graphio.log"), 64 * 1024));
+    let local_compatibility_manifest = compatibility_cache_path(app)
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|contents| serde_json::from_str(&contents).ok());
+    let generated_at_unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(DiagnosticsReport {
+        schema_version: 1,
+        generated_at_unix_seconds,
+        client_version: app.package_info().version.to_string(),
+        platform: std::env::consts::OS.to_string(),
+        architecture: std::env::consts::ARCH.to_string(),
+        settings,
+        logic,
+        bridge_state,
+        recent_logs,
+        graph_log_tail,
+        local_compatibility_manifest,
+    })
+}
+
+#[tauri::command]
+async fn diagnostics_export(app: AppHandle) -> Result<Option<String>, String> {
+    let report = diagnostics_report(&app)?;
+    let generated_at = report.generated_at_unix_seconds;
+    let dialog_app = app.clone();
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        dialog_app
+            .dialog()
+            .file()
+            .set_title("导出 PXLogic Bridge 诊断")
+            .set_file_name(format!("pxlogic-bridge-diagnostics-{generated_at}.json"))
+            .add_filter("JSON", &["json"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|error| format!("诊断文件选择任务失败: {error}"))?;
+    let Some(path) = selected else {
+        return Ok(None);
+    };
+    let mut path = path
+        .into_path()
+        .map_err(|error| format!("诊断文件路径无效: {error}"))?;
+    if path.extension().is_none() {
+        path.set_extension("json");
+    }
+    let contents = serde_json::to_string_pretty(&report)
+        .map_err(|error| format!("无法序列化诊断信息: {error}"))?;
+    fs::write(&path, format!("{contents}\n"))
+        .map_err(|error| format!("无法写入诊断文件: {error}"))?;
+    Ok(Some(path.display().to_string()))
 }
 
 #[tauri::command]
@@ -2268,7 +2499,9 @@ fn main() {
             logic_browse,
             pxlogic_scan,
             bridge_start,
+            bridge_restart,
             bridge_stop,
+            diagnostics_export,
             logs_open,
             manual_open,
         ])
@@ -2366,6 +2599,35 @@ mod tests {
             Some(54102)
         );
         assert_eq!(parse_ready_port("other output"), None);
+    }
+
+    #[test]
+    fn parses_capture_recovery_event() {
+        let event = parse_bridge_runtime_event(
+            r#"[logic2-bridge:event] {"type":"capture-unavailable","code":"PXLOGIC_RATE_MISMATCH","detail":"rate","recoveryAction":"restart-bridge"}"#,
+        )
+        .unwrap();
+        assert_eq!(event.event_type, "capture-unavailable");
+        assert_eq!(event.code, "PXLOGIC_RATE_MISMATCH");
+        assert_eq!(event.detail.as_deref(), Some("rate"));
+        assert_eq!(event.recovery_action.as_deref(), Some("restart-bridge"));
+        assert!(parse_bridge_runtime_event("ordinary log").is_none());
+    }
+
+    #[test]
+    fn classifies_start_failures_into_user_actions() {
+        assert_eq!(
+            classify_start_failure("GraphServer profile mismatch"),
+            ("LOGIC_COMPATIBILITY", "review-logic")
+        );
+        assert_eq!(
+            classify_start_failure("PXLogic firmware missing"),
+            ("PXLOGIC_NOT_READY", "rescan-hardware")
+        );
+        assert_eq!(
+            classify_start_failure("unexpected spawn failure"),
+            ("BRIDGE_START_FAILED", "export-diagnostics")
+        );
     }
 
     #[test]

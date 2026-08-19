@@ -115,7 +115,8 @@ footer p {
 }
 
 .status-starting .status-dot,
-.status-stopping .status-dot {
+.status-stopping .status-dot,
+.status-recovery .status-dot {
   background: #edb83f;
 }
 
@@ -422,6 +423,62 @@ select:focus {
 
 .activity-heading {
   margin-bottom: 10px;
+}
+
+.activity-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.recovery-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 48px;
+  margin-bottom: 10px;
+  padding: 9px 11px;
+  color: #7f3328;
+  background: #f6e1dd;
+  border-left: 3px solid #c94230;
+  border-radius: 4px;
+}
+
+.recovery-panel[hidden] {
+  display: none;
+}
+
+.recovery-panel > div {
+  min-width: 0;
+}
+
+.recovery-panel strong,
+.recovery-panel span {
+  display: block;
+}
+
+.recovery-panel strong {
+  font-size: 12px;
+}
+
+.recovery-panel span {
+  margin-top: 3px;
+  color: #75504a;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.recovery-panel code {
+  flex: 0 0 auto;
+  color: #7f3328;
+  font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.recovery-panel.recovery-required {
+  color: #805c12;
+  background: #f5e8c7;
+  border-left-color: #c38b1d;
 }
 
 #log-output {

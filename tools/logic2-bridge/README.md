@@ -263,6 +263,18 @@ startup.
 
 ## Diagnostics
 
+The desktop client's `导出诊断` action writes a local JSON report containing
+the selected settings, Logic fingerprint result, compatibility cache, current
+Bridge state, recent runtime logs, and the tail of `graphio.log`. The report is
+created only at the path selected by the user and is never uploaded.
+
+Capture helper failures are classified with stable error codes. A rate,
+channel-mapping, conversion, helper-start, or helper-exit failure changes the
+client to a recovery-required state. `重新初始化 Bridge` first stops the current
+Bridge process, waits for it to exit, and only then starts a fresh process that
+performs the one-time FPGA prepare again. No automatic hardware reconfiguration
+is attempted after a capture failure.
+
 `--dry-run` validates the app version, GraphServer resources, PXLogic helper,
 firmware, bitstreams, and native host build without launching Logic:
 
