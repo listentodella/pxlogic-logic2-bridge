@@ -46,6 +46,7 @@
           <strong id="graph-fingerprint">--</strong>
           <span id="logic-compatibility" class="compatibility">未检测</span>
         </div>
+        <p id="compatibility-detail" class="compatibility-detail">等待检查正式支持状态</p>
       </section>
 
       <section class="settings-section hardware-section">
@@ -75,6 +76,37 @@
           <div><span>固件</span><strong id="pxlogic-firmware">--</strong></div>
           <div><span>FPGA</span><strong id="pxlogic-bitstream">--</strong></div>
           <div><span>硬件阈值</span><strong id="pxlogic-threshold-value">1.800 V</strong></div>
+        </div>
+      </section>
+
+      <section class="settings-section readiness-section">
+        <div class="section-heading compact-heading">
+          <div>
+            <h2>启动检查</h2>
+            <p id="readiness-summary">正在检查 Logic 2 与 PXLogic...</p>
+          </div>
+        </div>
+
+        <div class="readiness-grid" aria-live="polite">
+          <div>
+            <span>Logic 2 支持级别</span>
+            <strong id="logic-readiness" class="readiness-value">待检测</strong>
+          </div>
+          <div>
+            <span>PXLogic 设备</span>
+            <strong id="hardware-readiness" class="readiness-value">待检测</strong>
+          </div>
+          <div>
+            <span>硬件阈值</span>
+            <strong id="threshold-readiness" class="readiness-value">待检查</strong>
+          </div>
+        </div>
+        <div id="session-source" class="session-source">
+          <span>Logic 2 会话设备</span>
+          <strong>Demo Logic Pro 16</strong>
+          <span class="source-separator" aria-hidden="true"></span>
+          <span>实际数据源</span>
+          <strong id="session-source-device">PXLogic</strong>
         </div>
       </section>
 

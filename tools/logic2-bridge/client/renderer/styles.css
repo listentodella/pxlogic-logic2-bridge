@@ -218,6 +218,14 @@ select:focus {
   color: #33363b;
 }
 
+.compatibility-detail {
+  min-height: 18px;
+  margin: 5px 0 0;
+  color: #6b7078;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 #graph-fingerprint {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -330,6 +338,82 @@ select:focus {
 
 .hardware-status-row strong.hardware-error {
   color: #a03b2d;
+}
+
+.readiness-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.readiness-grid > div {
+  min-width: 0;
+  padding-right: 18px;
+  border-right: 1px solid #d7d9de;
+}
+
+.readiness-grid > div:last-child {
+  padding-right: 0;
+  border-right: 0;
+}
+
+.readiness-grid span,
+.readiness-grid strong {
+  display: block;
+}
+
+.readiness-grid span {
+  margin-bottom: 5px;
+  color: #7a7f87;
+  font-size: 11px;
+}
+
+.readiness-value {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.readiness-ok { color: #276b44; }
+.readiness-warn { color: #805c12; }
+.readiness-error { color: #a03b2d; }
+.readiness-muted { color: #6b7078; }
+
+.session-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  margin-top: 15px;
+  padding-top: 12px;
+  color: #6b7078;
+  border-top: 1px solid #dde0e4;
+  font-size: 12px;
+}
+
+.session-source strong {
+  max-width: 250px;
+  overflow: hidden;
+  color: #33363b;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-separator {
+  width: 1px;
+  height: 16px;
+  margin: 0 5px;
+  background: #c9ccd2;
+}
+
+.session-source-active {
+  color: #276b44;
+}
+
+.session-source-active strong {
+  color: #205c3a;
 }
 
 .activity-section {

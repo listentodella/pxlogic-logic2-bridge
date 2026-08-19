@@ -33,6 +33,7 @@ const elements = {
   logicVersion: document.querySelector('#logic-version'),
   graphFingerprint: document.querySelector('#graph-fingerprint'),
   compatibility: document.querySelector('#logic-compatibility'),
+  compatibilityDetail: document.querySelector('#compatibility-detail'),
   compatibilityWarning: document.querySelector('#compatibility-warning'),
   compatibilityWarningMessage: document.querySelector('#compatibility-warning-message'),
   openManualButton: document.querySelector('#open-manual-button'),
@@ -49,6 +50,12 @@ const elements = {
   pxlogicFirmware: document.querySelector('#pxlogic-firmware'),
   pxlogicBitstream: document.querySelector('#pxlogic-bitstream'),
   pxlogicThresholdValue: document.querySelector('#pxlogic-threshold-value'),
+  readinessSummary: document.querySelector('#readiness-summary'),
+  logicReadiness: document.querySelector('#logic-readiness'),
+  hardwareReadiness: document.querySelector('#hardware-readiness'),
+  thresholdReadiness: document.querySelector('#threshold-readiness'),
+  sessionSource: document.querySelector('#session-source'),
+  sessionSourceDevice: document.querySelector('#session-source-device'),
   portAuto: document.querySelector('#port-auto'),
   portFixed: document.querySelector('#port-fixed'),
   preferredPort: document.querySelector('#preferred-port'),
@@ -102,6 +109,80 @@ function isHardwareThresholdValid() {
   return Number.isFinite(threshold) && threshold >= 0 && threshold <= 6.668;
 }
 
+function setReadinessValue(element, label, tone) {
+  element.textContent = label;
+  element.className = `readiness-value readiness-${tone}`;
+}
+
+function selectedHardwareLabel() {
+  const device = selectedHardwareDevice();
+  if (!device) return 'PXLogic';
+  const model = device.profileModel || device.product || device.label || 'PXLogic';
+  return device.serialNumber ? `${model} · ${device.serialNumber}` : model;
+}
+
+function renderReadiness() {
+  const logicReady = Boolean(currentInspection?.runnable);
+  const hardwareReady = isHardwareReady();
+  const thresholdReady = isHardwareThresholdValid();
+  const threshold = Number(elements.pxlogicThreshold.value);
+
+  if (currentInspection?.supported) {
+    setReadinessValue(elements.logicReadiness, '正式支持', 'ok');
+  } else if (currentInspection?.runnable) {
+    setReadinessValue(elements.logicReadiness, '实验验证', 'warn');
+  } else if (currentInspection?.path) {
+    setReadinessValue(elements.logicReadiness, '不可用', 'error');
+  } else {
+    setReadinessValue(elements.logicReadiness, '待检测', 'muted');
+  }
+
+  if (hardwareScanning) {
+    setReadinessValue(elements.hardwareReadiness, '检测中', 'muted');
+  } else if (hardwareReady) {
+    setReadinessValue(elements.hardwareReadiness, '已就绪', 'ok');
+  } else if (selectedHardwareDevice()) {
+    setReadinessValue(elements.hardwareReadiness, '设备异常', 'error');
+  } else {
+    setReadinessValue(elements.hardwareReadiness, '未连接', 'error');
+  }
+
+  if (thresholdReady) {
+    setReadinessValue(elements.thresholdReadiness, `${threshold.toFixed(3)} V`, 'ok');
+  } else {
+    setReadinessValue(elements.thresholdReadiness, '无效', 'error');
+  }
+
+  if (logicReady && hardwareReady && thresholdReady) {
+    elements.readinessSummary.textContent = currentInspection.supported
+      ? '正式支持路径已就绪'
+      : '实验路径已就绪，尚未完成正式硬件验证';
+  } else {
+    elements.readinessSummary.textContent = '完成异常项后才能启动 Bridge';
+  }
+  elements.sessionSourceDevice.textContent = selectedHardwareLabel();
+  elements.sessionSource.classList.toggle('session-source-active', isActive());
+}
+
+function renderFooterMessage() {
+  if (currentState.phase === 'error') {
+    elements.footerMessage.textContent = currentState.message;
+    return;
+  }
+  if (isActive()) {
+    elements.footerMessage.textContent =
+      `Logic 2 请选择 Demo Logic Pro 16；波形数据来自 ${selectedHardwareLabel()}`;
+    return;
+  }
+  if (currentInspection?.supported && isHardwareReady() && isHardwareThresholdValid()) {
+    elements.footerMessage.textContent = '正式支持路径已就绪，可以启动 Logic 2';
+  } else if (currentInspection?.runnable && isHardwareReady() && isHardwareThresholdValid()) {
+    elements.footerMessage.textContent = '当前为实验验证路径，不属于正式支持';
+  } else {
+    elements.footerMessage.textContent = '完成启动检查后可以启动 Logic 2';
+  }
+}
+
 function renderState(state) {
   currentState = state;
   elements.status.className = `status status-${state.phase}`;
@@ -135,6 +216,8 @@ function renderState(state) {
     logicAnalyzing ||
     !isHardwareThresholdValid() ||
     (!disableSettings && (!currentInspection?.runnable || !isHardwareReady()));
+  renderReadiness();
+  renderFooterMessage();
 }
 
 function setPortMode(mode) {
@@ -162,16 +245,20 @@ function renderInspection(inspection) {
   if (!inspection?.path) {
     elements.logicSummary.textContent = '未找到 Logic 2';
     elements.compatibility.textContent = '未检测';
+    elements.compatibilityDetail.textContent = '请选择官方 Logic 2 安装后重新检查';
   } else if (inspection.supported) {
     elements.logicSummary.textContent = `已匹配 ${inspection.profileId}`;
-    elements.compatibility.textContent = '已验证';
+    elements.compatibility.textContent = '正式支持';
     elements.compatibility.classList.add('compatible');
+    elements.compatibilityDetail.textContent =
+      '该 GraphServer 已完成真实 PXLogic 采集验证';
   } else if (inspection.runnable) {
     elements.logicSummary.textContent = inspection.error || `实验性 ${inspection.profileId}`;
-    elements.compatibility.textContent = inspection.hookStatus === 'candidate'
-      ? '自动候选'
-      : '实验性';
+    elements.compatibility.textContent = '实验验证';
     elements.compatibility.classList.add('experimental');
+    elements.compatibilityDetail.textContent = inspection.hookStatus === 'candidate'
+      ? '自动分析得到唯一候选，但 ABI 与真实采集尚未验证'
+      : '仅用于真实硬件验证，尚未达到正式支持标准';
   } else {
     elements.logicSummary.textContent = inspection.error || '安装不可用';
     elements.compatibility.textContent = inspection.hookStatus === 'unsupported'
@@ -182,6 +269,9 @@ function renderInspection(inspection) {
           ? '待验证'
           : '不兼容';
     elements.compatibility.classList.add('incompatible');
+    elements.compatibilityDetail.textContent = inspection.hookStatus === 'unsupported'
+      ? '没有得到可安全注入的唯一候选，Bridge 不会修改该 GraphServer'
+      : '该安装尚未满足 Bridge 的安全启动条件';
   }
   renderState(currentState);
   showCompatibilityWarning(inspection);
@@ -262,6 +352,8 @@ function updateThresholdLabel() {
   elements.pxlogicThreshold.setCustomValidity(
     valid ? '' : '电压判断阈值必须在 0.000 V 到 6.668 V 之间',
   );
+  renderReadiness();
+  renderFooterMessage();
 }
 
 async function inspectPath() {

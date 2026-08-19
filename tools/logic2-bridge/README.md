@@ -161,6 +161,12 @@ is independent from Logic 2's nominal I/O-level selector. Logic 2 remains
 authoritative for enabled channels, sample rate, capture control, triggers,
 software glitch filters, and analyzers.
 
+The launch checklist labels a matched GraphServer as `正式支持`, `实验验证`, or
+`不可用`; a runnable experimental profile is never presented as formally
+supported. It also keeps the session mapping visible: `Demo Logic Pro 16` is
+the Logic 2 compatibility device, while the selected PXLogic remains the real
+sample source.
+
 Click `Start Logic 2` after a verified profile is shown. For a locally analyzed
 candidate, review the automatic-candidate status and use `启动实验验证`; an
 unsupported result is not injected.
