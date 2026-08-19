@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const {
   buildChecks,
@@ -38,4 +39,21 @@ test('delivery report path is explicit and version drift remains visible', () =>
   const versions = versionCheck();
   assert.match(versions.status, /^(PASS|WARN)$/);
   assert.equal(typeof versions.versions.tauriConfig, 'string');
+});
+
+test('experimental profile launch keeps an explicit one-shot confirmation contract', () => {
+  const rendererRoot = path.resolve(__dirname, '../client/renderer');
+  const html = fs.readFileSync(path.join(rendererRoot, 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(rendererRoot, 'app.js'), 'utf8');
+
+  assert.match(html, /id="experimental-confirmation"/);
+  assert.match(html, /id="experimental-confirmation-checkbox"/);
+  assert.match(html, /id="continue-experimental-button"[^>]*disabled/);
+  assert.match(app, /let experimentalConfirmationToken = null;/);
+  assert.match(app, /phase: currentState\.phase/);
+  assert.match(app, /experimentalConfirmationToken\.confirmed = true/);
+  assert.match(app, /!elements\.experimentalConfirmationCheckbox\.checked/);
+  assert.match(app, /function requestExperimentalConfirmation\(\)/);
+  assert.match(app, /function consumeExperimentalConfirmationFingerprint\(\)/);
+  assert.match(app, /pendingProfileFingerprint,/);
 });

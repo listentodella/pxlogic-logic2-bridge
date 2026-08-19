@@ -218,6 +218,19 @@
       </div>
     </dialog>
 
+    <dialog id="experimental-confirmation" class="warning-dialog">
+      <h2>启动实验验证？</h2>
+      <p id="experimental-confirmation-message"></p>
+      <label class="confirmation-check" for="experimental-confirmation-checkbox">
+        <input id="experimental-confirmation-checkbox" type="checkbox">
+        <span>我确认当前不是关键采集任务，并接受实验性启动风险</span>
+      </label>
+      <div class="dialog-actions">
+        <button id="cancel-experimental-button" class="secondary-button" type="button">取消</button>
+        <button id="continue-experimental-button" class="primary-button" type="button" disabled>继续启动</button>
+      </div>
+    </dialog>
+
     <script src="app.js"></script>
   </body>
 </html>

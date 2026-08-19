@@ -662,6 +662,21 @@ footer p {
   overflow-wrap: anywhere;
 }
 
+.confirmation-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 16px;
+  color: #3f444b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.confirmation-check input {
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+}
+
 .dialog-actions {
   display: flex;
   justify-content: flex-end;

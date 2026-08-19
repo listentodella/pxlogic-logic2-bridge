@@ -39,6 +39,11 @@ const elements = {
   compatibilityDetail: document.querySelector('#compatibility-detail'),
   compatibilityWarning: document.querySelector('#compatibility-warning'),
   compatibilityWarningMessage: document.querySelector('#compatibility-warning-message'),
+  experimentalConfirmation: document.querySelector('#experimental-confirmation'),
+  experimentalConfirmationMessage: document.querySelector('#experimental-confirmation-message'),
+  experimentalConfirmationCheckbox: document.querySelector('#experimental-confirmation-checkbox'),
+  continueExperimentalButton: document.querySelector('#continue-experimental-button'),
+  cancelExperimentalButton: document.querySelector('#cancel-experimental-button'),
   openManualButton: document.querySelector('#open-manual-button'),
   closeWarningButton: document.querySelector('#close-warning-button'),
   analyzeButton: document.querySelector('#analyze-button'),
@@ -99,6 +104,7 @@ let hardwareScanning = false;
 let logicAnalyzing = false;
 let inspectionSequence = 0;
 const warnedCompatibilityFingerprints = new Set();
+let experimentalConfirmationToken = null;
 
 function isActive() {
   return ['starting', 'running', 'stopping', 'recovery'].includes(currentState.phase);
@@ -110,6 +116,51 @@ function needsRecovery() {
 
 function needsUsbReconnectRecovery() {
   return needsRecovery() && currentState.recoveryAction === 'rescan-and-restart';
+}
+
+function needsExperimentalConfirmation() {
+  return Boolean(currentInspection?.runnable && !currentInspection.supported);
+}
+
+function clearExperimentalConfirmation() {
+  experimentalConfirmationToken = null;
+}
+
+function requestExperimentalConfirmation() {
+  if (!needsExperimentalConfirmation()) return true;
+  if (experimentalConfirmationToken &&
+      experimentalConfirmationToken.confirmed &&
+      experimentalConfirmationToken.phase === currentState.phase &&
+      experimentalConfirmationToken.graphSha256 === currentInspection.graphSha256 &&
+      experimentalConfirmationToken.profileId === currentInspection.profileId) {
+    return true;
+  }
+  experimentalConfirmationToken = {
+    profileId: currentInspection.profileId || '',
+    graphSha256: currentInspection.graphSha256 || '',
+    phase: currentState.phase,
+    confirmed: false,
+  };
+  const profile = currentInspection.profileId || '当前 profile';
+  elements.experimentalConfirmationMessage.textContent =
+    `${profile} 尚未完成真实 ABI 与 PXLogic 采集验证。继续会以实验性 profile 启动，` +
+    '可能导致 Logic 2 无法启动或需要重新初始化；不会修改官方 profile。';
+  elements.experimentalConfirmationCheckbox.checked = false;
+  elements.continueExperimentalButton.disabled = true;
+  if (!elements.experimentalConfirmation.open) elements.experimentalConfirmation.showModal();
+  return false;
+}
+
+function consumeExperimentalConfirmationFingerprint() {
+  const fingerprint = needsExperimentalConfirmation() &&
+    experimentalConfirmationToken?.confirmed === true &&
+    experimentalConfirmationToken?.phase === currentState.phase &&
+    experimentalConfirmationToken?.graphSha256 === currentInspection.graphSha256 &&
+    experimentalConfirmationToken?.profileId === (currentInspection.profileId || '')
+    ? experimentalConfirmationToken.graphSha256
+    : null;
+  clearExperimentalConfirmation();
+  return fingerprint;
 }
 
 function selectedHardwareDevice() {
@@ -356,6 +407,9 @@ function renderTelemetry(telemetry) {
 
 function renderState(state) {
   currentState = state;
+  if (experimentalConfirmationToken && experimentalConfirmationToken.phase !== state.phase) {
+    clearExperimentalConfirmation();
+  }
   elements.status.className = `status status-${state.phase}`;
   elements.statusLabel.textContent = state.message;
   elements.endpointLabel.textContent = state.actualPort
@@ -411,6 +465,12 @@ function setPortMode(mode) {
 
 function renderInspection(inspection) {
   currentInspection = inspection;
+  if (experimentalConfirmationToken &&
+      (experimentalConfirmationToken.graphSha256 !== inspection?.graphSha256 ||
+       experimentalConfirmationToken.profileId !== (inspection?.profileId || ''))) {
+    clearExperimentalConfirmation();
+    if (elements.experimentalConfirmation.open) elements.experimentalConfirmation.close();
+  }
   const runtime = inspection?.nodeVersion ? ` · Node ${inspection.nodeVersion}` : '';
   elements.logicVersion.textContent = inspection?.version ? `${inspection.version}${runtime}` : '--';
   const graphIdentity = inspection?.graphIdentity || '';
@@ -591,7 +651,7 @@ async function inspectPath() {
   if (sequence === inspectionSequence) renderInspection(inspection);
 }
 
-function readSettings() {
+function readSettings(pendingProfileFingerprint = null) {
   const windowPosition = elements.screenQuadrant.value;
   rememberThresholdProfile();
   return {
@@ -603,6 +663,7 @@ function readSettings() {
     pxlogicDeviceId: elements.pxlogicDevice.value,
     pxlogicThresholdVolts: Number(elements.pxlogicThreshold.value),
     pxlogicThresholdProfiles: JSON.parse(JSON.stringify(thresholdProfiles)),
+    pendingProfileFingerprint,
   };
 }
 
@@ -747,11 +808,27 @@ elements.openManualButton.addEventListener('click', async () => {
 elements.closeWarningButton.addEventListener('click', () => {
   elements.compatibilityWarning.close();
 });
+elements.experimentalConfirmationCheckbox.addEventListener('change', () => {
+  elements.continueExperimentalButton.disabled = !elements.experimentalConfirmationCheckbox.checked;
+});
+elements.cancelExperimentalButton.addEventListener('click', () => {
+  clearExperimentalConfirmation();
+  elements.experimentalConfirmation.close();
+});
+elements.experimentalConfirmation.addEventListener('cancel', clearExperimentalConfirmation);
+elements.continueExperimentalButton.addEventListener('click', () => {
+  if (!experimentalConfirmationToken || !elements.experimentalConfirmationCheckbox.checked) return;
+  experimentalConfirmationToken.confirmed = true;
+  elements.experimentalConfirmation.close();
+  elements.startButton.click();
+});
 elements.startButton.addEventListener('click', async () => {
   try {
     if (isActive()) {
       if (needsRecovery()) {
         if (typeof api.restart !== 'function') throw new Error('当前客户端不支持安全重新初始化');
+        if (!requestExperimentalConfirmation()) return;
+        const pendingProfileFingerprint = consumeExperimentalConfirmationFingerprint();
         if (needsUsbReconnectRecovery()) {
           const previousDeviceId = elements.pxlogicDevice.value;
           rememberThresholdProfile(previousDeviceId);
@@ -768,14 +845,16 @@ elements.startButton.addEventListener('click', async () => {
             `${elements.pxlogicDevice.value}`,
           );
         }
-        const state = await api.restart(readSettings());
+        const state = await api.restart(readSettings(pendingProfileFingerprint));
         renderState(state);
       } else {
         await api.stop();
       }
     } else {
       if (!elements.pxlogicThreshold.reportValidity()) return;
-      const state = await api.start(readSettings());
+      if (!requestExperimentalConfirmation()) return;
+      const pendingProfileFingerprint = consumeExperimentalConfirmationFingerprint();
+      const state = await api.start(readSettings(pendingProfileFingerprint));
       renderState(state);
     }
   } catch (error) {

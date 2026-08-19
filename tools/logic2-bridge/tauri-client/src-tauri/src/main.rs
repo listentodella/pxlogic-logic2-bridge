@@ -45,6 +45,10 @@ struct ClientSettings {
     temporary_comparator_threshold_volts: Option<f64>,
     #[serde(default)]
     pxlogic_threshold_profiles: BTreeMap<String, ThresholdProfile>,
+    // This one-shot UI authorization is bound to the inspected GraphServer
+    // fingerprint and must never be persisted with the user's settings.
+    #[serde(default, skip_serializing)]
+    pending_profile_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -77,6 +81,7 @@ impl Default for ClientSettings {
             pxlogic_threshold_volts: default_pxlogic_threshold_volts(),
             temporary_comparator_threshold_volts: None,
             pxlogic_threshold_profiles: BTreeMap::new(),
+            pending_profile_fingerprint: None,
         }
     }
 }
@@ -1235,6 +1240,50 @@ fn profile_matches_graph(profile: &CompatibilityProfile, graph: &GraphInspection
         && profile.graph.identity_kind == graph.identity_kind
         && profile.graph.identity.eq_ignore_ascii_case(&graph.identity)
         && profile.graph.sha256.eq_ignore_ascii_case(&graph.sha256)
+}
+
+fn requires_pending_profile_authorization(inspection: &LogicInspection) -> bool {
+    !inspection.supported
+        && inspection.runnable
+        && matches!(
+            inspection.hook_status.as_deref(),
+            Some("pending-live-validation" | "candidate" | "locally-verified")
+        )
+}
+
+fn has_pending_profile_authorization(
+    inspection: &LogicInspection,
+    fingerprint: Option<&str>,
+) -> bool {
+    requires_pending_profile_authorization(inspection)
+        && matches!(
+            (inspection.graph_sha256.as_deref(), fingerprint),
+            (Some(actual), Some(authorized)) if actual.eq_ignore_ascii_case(authorized)
+        )
+}
+
+fn validate_bridge_start_compatibility(
+    app: &AppHandle,
+    settings: &ClientSettings,
+) -> Result<LogicInspection, String> {
+    let inspection = inspect_logic_selection(Some(app), Path::new(&settings.logic_app_path), false);
+    if !inspection.runnable {
+        return Err(inspection
+            .error
+            .unwrap_or_else(|| "Logic 2 安装无效".to_string()));
+    }
+    if requires_pending_profile_authorization(&inspection)
+        && !has_pending_profile_authorization(
+            &inspection,
+            settings.pending_profile_fingerprint.as_deref(),
+        )
+    {
+        return Err(format!(
+            "Logic 2 profile {} 仍处于实验验证状态；请在启动前明确确认实验性采集风险",
+            inspection.profile_id.as_deref().unwrap_or("unknown")
+        ));
+    }
+    Ok(inspection)
 }
 
 fn probe_logic_node(executable: &Path, timeout: Duration) -> Result<NodeVersions, String> {
@@ -2491,12 +2540,7 @@ async fn bridge_start(app: AppHandle, settings: ClientSettings) -> Result<Bridge
 
 fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<BridgeState, String> {
     let mut settings = store_settings(app, settings)?;
-    let inspection = inspect_logic_selection(Some(app), Path::new(&settings.logic_app_path), false);
-    if !inspection.runnable {
-        return Err(inspection
-            .error
-            .unwrap_or_else(|| "Logic 2 安装无效".to_string()));
-    }
+    let inspection = validate_bridge_start_compatibility(app, &settings)?;
     settings.logic_app_path = inspection.path.clone();
     settings = store_settings(app, settings)?;
     let selected_app_path = PathBuf::from(&settings.logic_app_path);
@@ -2559,9 +2603,9 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
     } else {
         command.args(["--screen-quadrant", &settings.screen_quadrant.to_string()]);
     }
-    if matches!(
-        inspection.hook_status.as_deref(),
-        Some("pending-live-validation" | "candidate" | "locally-verified")
+    if has_pending_profile_authorization(
+        &inspection,
+        settings.pending_profile_fingerprint.as_deref(),
     ) {
         command.arg("--allow-pending-profile");
     }
@@ -2662,6 +2706,7 @@ fn wait_for_bridge_stop(app: &AppHandle, timeout: Duration) -> Result<(), String
 
 #[tauri::command]
 async fn bridge_restart(app: AppHandle, settings: ClientSettings) -> Result<BridgeState, String> {
+    validate_bridge_start_compatibility(&app, &settings)?;
     request_stop(&app)?;
     let wait_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -3061,6 +3106,7 @@ mod tests {
                     reference: "custom".to_string(),
                 },
             )]),
+            pending_profile_fingerprint: None,
         }
         .normalized();
         assert_eq!(settings.logic_app_path, "/Applications/Saleae Logic.app");
@@ -3195,6 +3241,68 @@ mod tests {
             classify_start_failure("unexpected spawn failure"),
             ("BRIDGE_START_FAILED", "export-diagnostics")
         );
+    }
+
+    #[test]
+    fn pending_profile_authorization_is_explicit_and_transient() {
+        let inspection = LogicInspection {
+            path: "/Applications/Saleae Logic.app".to_string(),
+            version: Some("2.4.46".to_string()),
+            supported: false,
+            runnable: true,
+            error: None,
+            node_version: Some("22.0.0".to_string()),
+            electron_version: Some("33.0.0".to_string()),
+            profile_id: Some("logic-candidate".to_string()),
+            graph_path: None,
+            graph_format: None,
+            graph_identity_kind: Some("macho-lc-uuid".to_string()),
+            graph_identity: Some("ABC".to_string()),
+            graph_sha256: Some("DEF".to_string()),
+            hook_status: Some("candidate".to_string()),
+        };
+        assert!(requires_pending_profile_authorization(&inspection));
+
+        assert!(has_pending_profile_authorization(&inspection, Some("DEF")));
+        assert!(!has_pending_profile_authorization(
+            &inspection,
+            Some("stale")
+        ));
+        assert!(!has_pending_profile_authorization(&inspection, None));
+
+        for status in ["pending-live-validation", "locally-verified"] {
+            let mut pending = inspection.clone();
+            pending.hook_status = Some(status.to_string());
+            assert!(requires_pending_profile_authorization(&pending));
+            assert!(has_pending_profile_authorization(&pending, Some("def")));
+        }
+        let mut unsupported = inspection.clone();
+        unsupported.runnable = false;
+        unsupported.hook_status = Some("unsupported".to_string());
+        assert!(!requires_pending_profile_authorization(&unsupported));
+        assert!(!has_pending_profile_authorization(
+            &unsupported,
+            Some("DEF")
+        ));
+        let mut missing_fingerprint = inspection.clone();
+        missing_fingerprint.graph_sha256 = None;
+        assert!(!has_pending_profile_authorization(
+            &missing_fingerprint,
+            Some("DEF")
+        ));
+
+        let mut verified = inspection.clone();
+        verified.supported = true;
+        verified.hook_status = Some("verified".to_string());
+        assert!(!requires_pending_profile_authorization(&verified));
+
+        let mut settings = ClientSettings::default();
+        settings.pending_profile_fingerprint = Some("DEF".to_string());
+        let serialized = serde_json::to_value(settings).unwrap();
+        assert!(!serialized
+            .as_object()
+            .unwrap()
+            .contains_key("pendingProfileFingerprint"));
     }
 
     #[test]
