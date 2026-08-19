@@ -8,6 +8,7 @@
     "dev": "pnpm --dir tools/logic2-bridge/tauri-client run dev",
     "tauri": "pnpm --dir tools/logic2-bridge/tauri-client run prepare:payload && pnpm --dir tools/logic2-bridge/tauri-client exec tauri",
     "check": "pnpm --dir tools/logic2-bridge run check && pnpm --dir tools/logic2-bridge/tauri-client run check",
-    "test": "pnpm --dir tools/logic2-bridge test && pnpm --dir tools/logic2-bridge/tauri-client test"
+    "test": "pnpm --dir tools/logic2-bridge test && pnpm --dir tools/logic2-bridge/tauri-client test",
+    "verify:delivery": "node tools/logic2-bridge/scripts/verify-delivery.cjs"
   }
 }

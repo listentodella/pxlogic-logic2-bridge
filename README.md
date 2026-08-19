@@ -29,6 +29,19 @@ candidate to verified support.
 
 ## Development checks
 
+Every Bridge feature must pass the same delivery gate locally and on the
+macOS GitHub Actions runner:
+
+```sh
+pnpm run verify:delivery
+```
+
+The command does not access PXLogic hardware. It writes a machine-readable
+report when called with `--report PATH`, records Git provenance and manifest
+versions, and fails when any required Node, PXLogic core/helper, or Tauri check
+fails. See the [Bridge delivery contract](docs/logic2-bridge-delivery.md) for
+the feature brief and acceptance-evidence requirements.
+
 ```sh
 npm --prefix tools/logic2-bridge/client ci
 npm --prefix tools/logic2-bridge/tauri-client ci

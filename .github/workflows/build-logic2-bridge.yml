@@ -8,6 +8,7 @@ on:
       - "v*"
     paths:
       - ".github/workflows/build-logic2-bridge.yml"
+      - "docs/logic2-bridge-delivery.md"
       - "docs/macos-distribution.md"
       - "tools/logic2-bridge/**"
       - "src-tauri/src/bin/usb_smoke.rs"
@@ -157,10 +158,10 @@ jobs:
           retention-days: 7
 
   tauri-client-check:
-    name: Tauri client check (${{ matrix.os_name }})
+    name: Bridge delivery gate (${{ matrix.os_name }})
     if: >-
       ${{
-        startsWith(github.ref, 'refs/tags/v') ||
+        github.event_name == 'push' ||
         (github.event_name == 'workflow_dispatch' &&
         (inputs.platform == 'macos' || inputs.platform == 'all'))
       }}
@@ -183,20 +184,33 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache delivery-check builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tools/logic2-bridge/tauri-client/src-tauri -> target
+          shared-key: bridge-delivery-macos
+
       - name: Install Tauri client dependencies
         run: npm --prefix tools/logic2-bridge/tauri-client ci
 
-      - name: Check shared renderer and bridge
-        run: |
-          npm --prefix tools/logic2-bridge run check
-          npm --prefix tools/logic2-bridge/client run check
-
-      - name: Test Tauri client
+      - name: Run delivery self-check
         env:
-          # The check job validates Rust/renderer code only. Native helper and
-          # GraphServer payloads are produced by the platform build job.
+          # Source verification does not require generated bundle resources.
           TAURI_CONFIG: '{"bundle":{"resources":[]}}'
-        run: npm --prefix tools/logic2-bridge/tauri-client test
+        run: >-
+          npm --prefix tools/logic2-bridge run verify:delivery --
+          --report "$RUNNER_TEMP/bridge-delivery-report.json"
+
+      - name: Upload delivery evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-delivery-report-${{ matrix.os_name }}
+          path: ${{ runner.temp }}/bridge-delivery-report.json
+          if-no-files-found: warn
+          retention-days: 14
 
   linux-native-host-check:
     name: Linux GraphServer host compile check
