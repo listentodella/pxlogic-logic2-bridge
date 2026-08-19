@@ -22,6 +22,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   maximizeLogicWindow: true,
   pxlogicDeviceId: '',
   pxlogicThresholdVolts: 1.8,
+  pxlogicThresholdProfiles: {},
 });
 const MAX_PXLOGIC_THRESHOLD_VOLTS = 6.668;
 
@@ -137,6 +138,19 @@ function normalizeSettings(value = {}) {
     : Number.isFinite(temporaryComparatorField)
       ? temporaryComparatorField
       : DEFAULT_SETTINGS.pxlogicThresholdVolts;
+  const pxlogicThresholdProfiles = {};
+  if (value.pxlogicThresholdProfiles && typeof value.pxlogicThresholdProfiles === 'object') {
+    for (const [deviceId, candidate] of Object.entries(value.pxlogicThresholdProfiles)) {
+      const volts = Number(candidate?.volts);
+      if (!deviceId.trim() || !Number.isFinite(volts) ||
+          volts < 0 || volts > MAX_PXLOGIC_THRESHOLD_VOLTS) continue;
+      pxlogicThresholdProfiles[deviceId] = {
+        volts,
+        verified: candidate.verified === true,
+        reference: typeof candidate.reference === 'string' ? candidate.reference.trim() : '',
+      };
+    }
+  }
   return {
     logicAppPath: typeof value.logicAppPath === 'string' ? value.logicAppPath.trim() : '',
     portMode,
@@ -154,6 +168,7 @@ function normalizeSettings(value = {}) {
       pxlogicThresholdVolts <= MAX_PXLOGIC_THRESHOLD_VOLTS
       ? pxlogicThresholdVolts
       : DEFAULT_SETTINGS.pxlogicThresholdVolts,
+    pxlogicThresholdProfiles,
   };
 }
 

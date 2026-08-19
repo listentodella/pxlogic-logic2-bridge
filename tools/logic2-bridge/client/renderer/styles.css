@@ -295,13 +295,54 @@ select:focus {
 
 .hardware-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(180px, 0.8fr);
-  gap: 22px;
+  grid-template-columns: minmax(0, 1.5fr) minmax(130px, 0.65fr) minmax(190px, 1fr);
+  gap: 16px;
 }
 
 .hardware-controls select,
 .hardware-controls input {
   width: 100%;
+}
+
+.threshold-assistance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 34px;
+  margin-top: 10px;
+}
+
+.threshold-verification {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin: 0;
+  color: #4f545b;
+  font-weight: 600;
+}
+
+.threshold-verification input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+}
+
+.threshold-guidance {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #805c12;
+  font-size: 11px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.threshold-guidance-verified {
+  color: #276b44;
 }
 
 .hardware-status-row {

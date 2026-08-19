@@ -68,6 +68,25 @@
             <input id="pxlogic-threshold" type="number" min="0" max="6.668" step="0.01"
               inputmode="decimal" value="1.80">
           </div>
+          <div>
+            <label for="threshold-reference">参考起点</label>
+            <select id="threshold-reference">
+              <option value="custom">自定义</option>
+              <option value="logic-1.8" data-volts="0.9">1.8 V 电平中点 · 0.9 V</option>
+              <option value="logic-2.5" data-volts="1.25">2.5 V 电平中点 · 1.25 V</option>
+              <option value="logic-3.3" data-volts="1.65">3.3 V 电平中点 · 1.65 V</option>
+              <option value="logic-5.0" data-volts="2.5">5.0 V 电平中点 · 2.5 V</option>
+              <option value="fixture-stm32-spi" data-volts="2.2">STM32 SPI 已验证夹具 · 2.2 V</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="threshold-assistance">
+          <label class="threshold-verification" for="threshold-verified">
+            <input id="threshold-verified" type="checkbox">
+            <span>已用已知协议结果验证当前阈值</span>
+          </label>
+          <p id="threshold-guidance">检测到边沿不代表数据正确，当前阈值尚未验证</p>
         </div>
 
         <div class="hardware-status-row">

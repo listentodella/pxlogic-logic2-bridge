@@ -262,6 +262,13 @@ interrupt rises, the following four-byte SPI read contains the expected
 `0x43`. A `1.5 V` capture showed activity but decoded the transaction
 incorrectly, so edge counts alone are not an acceptable threshold test.
 
+The desktop client provides common logic-level midpoint values only as starting
+references, not correctness claims. It stores the chosen voltage, reference,
+and user-confirmed protocol-validation state separately for each PXLogic device.
+Changing the voltage or reference clears that validation state. The `2.2 V`
+STM32 SPI fixture option remains unverified for a different target until the
+user confirms known protocol contents and explicitly marks it as validated.
+
 The one-time FPGA prepare can still produce a hardware-front-end transient. If
 the target bus is affected when the Bridge itself starts, stop testing and
 verify probe grounding and input impedance with an oscilloscope. Repeated Logic

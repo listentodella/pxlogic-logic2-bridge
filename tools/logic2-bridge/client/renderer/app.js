@@ -48,6 +48,9 @@ const elements = {
   pxlogicRescanButton: document.querySelector('#pxlogic-rescan-button'),
   pxlogicDevice: document.querySelector('#pxlogic-device'),
   pxlogicThreshold: document.querySelector('#pxlogic-threshold'),
+  thresholdReference: document.querySelector('#threshold-reference'),
+  thresholdVerified: document.querySelector('#threshold-verified'),
+  thresholdGuidance: document.querySelector('#threshold-guidance'),
   pxlogicSerial: document.querySelector('#pxlogic-serial'),
   pxlogicUsbSpeed: document.querySelector('#pxlogic-usb-speed'),
   pxlogicFirmware: document.querySelector('#pxlogic-firmware'),
@@ -91,6 +94,7 @@ let currentState = { phase: 'stopped', actualPort: null, message: '待机' };
 let currentInspection = null;
 let currentHardware = null;
 let currentTelemetry = { status: 'idle', enabledChannels: [] };
+let thresholdProfiles = {};
 let hardwareScanning = false;
 let logicAnalyzing = false;
 let inspectionSequence = 0;
@@ -171,15 +175,24 @@ function renderReadiness() {
   }
 
   if (thresholdReady) {
-    setReadinessValue(elements.thresholdReadiness, `${threshold.toFixed(3)} V`, 'ok');
+    const verified = elements.thresholdVerified.checked;
+    setReadinessValue(
+      elements.thresholdReadiness,
+      `${threshold.toFixed(3)} V ${verified ? '已验证' : '待验证'}`,
+      verified ? 'ok' : 'warn',
+    );
   } else {
     setReadinessValue(elements.thresholdReadiness, '无效', 'error');
   }
 
   if (logicReady && hardwareReady && thresholdReady) {
-    elements.readinessSummary.textContent = currentInspection.supported
-      ? '正式支持路径已就绪'
-      : '实验路径已就绪，尚未完成正式硬件验证';
+    if (!elements.thresholdVerified.checked) {
+      elements.readinessSummary.textContent = '可以启动采集；当前阈值仍需协议验证';
+    } else {
+      elements.readinessSummary.textContent = currentInspection.supported
+        ? '正式支持路径已就绪'
+        : '实验路径已就绪，尚未完成正式硬件验证';
+    }
   } else {
     elements.readinessSummary.textContent = '完成异常项后才能启动 Bridge';
   }
@@ -361,6 +374,8 @@ function renderState(state) {
   elements.pxlogicDevice.disabled = disableSettings || hardwareScanning ||
     !currentHardware?.devices?.length;
   elements.pxlogicThreshold.disabled = disableSettings;
+  elements.thresholdReference.disabled = disableSettings;
+  elements.thresholdVerified.disabled = disableSettings;
   elements.portAuto.disabled = disableSettings;
   elements.portFixed.disabled = disableSettings;
   elements.preferredPort.disabled = disableSettings || portMode !== 'fixed';
@@ -498,14 +513,64 @@ function renderHardware(hardware) {
   renderState(currentState);
 }
 
+function rememberThresholdProfile(deviceId = elements.pxlogicDevice.value) {
+  if (!deviceId || !isHardwareThresholdValid()) return;
+  thresholdProfiles[deviceId] = {
+    volts: Number(elements.pxlogicThreshold.value),
+    verified: elements.thresholdVerified.checked,
+    reference: elements.thresholdReference.value,
+  };
+}
+
+function applyThresholdProfile(deviceId) {
+  const profile = thresholdProfiles[deviceId];
+  if (profile && Number.isFinite(Number(profile.volts))) {
+    elements.pxlogicThreshold.value = String(profile.volts);
+    elements.thresholdVerified.checked = profile.verified === true;
+    elements.thresholdReference.value = elements.thresholdReference.querySelector(
+      `option[value="${CSS.escape(profile.reference || 'custom')}"]`,
+    ) ? profile.reference : 'custom';
+  } else {
+    elements.thresholdVerified.checked = false;
+    elements.thresholdReference.value = 'custom';
+  }
+  updateThresholdLabel();
+}
+
+function renderThresholdGuidance() {
+  if (elements.thresholdVerified.checked) {
+    elements.thresholdGuidance.textContent =
+      `已为 ${selectedHardwareLabel()} 记录协议验证结果`;
+    elements.thresholdGuidance.className = 'threshold-guidance threshold-guidance-verified';
+    return;
+  }
+  const reference = elements.thresholdReference.value;
+  if (reference === 'fixture-stm32-spi') {
+    elements.thresholdGuidance.textContent =
+      '2.2 V 只在现有 STM32 3.3 V SPI 夹具验证；当前目标仍需复核';
+  } else if (reference.startsWith('logic-')) {
+    elements.thresholdGuidance.textContent =
+      '电平中点仅是起始值；请用已知协议内容确认数字判定正确';
+  } else {
+    elements.thresholdGuidance.textContent =
+      '检测到边沿不代表数据正确，当前阈值尚未验证';
+  }
+  elements.thresholdGuidance.className = 'threshold-guidance';
+}
+
 function updateThresholdLabel() {
   const threshold = Number(elements.pxlogicThreshold.value);
   const valid = isHardwareThresholdValid();
-  elements.pxlogicThresholdValue.textContent = valid ? `${threshold.toFixed(3)} V` : '无效';
+  const verified = valid && elements.thresholdVerified.checked;
+  elements.pxlogicThresholdValue.textContent = valid
+    ? `${threshold.toFixed(3)} V${verified ? ' · 已验证' : ''}`
+    : '无效';
+  elements.pxlogicThresholdValue.title = elements.pxlogicThresholdValue.textContent;
   elements.pxlogicThresholdValue.classList.toggle('hardware-error', !valid);
   elements.pxlogicThreshold.setCustomValidity(
     valid ? '' : '电压判断阈值必须在 0.000 V 到 6.668 V 之间',
   );
+  renderThresholdGuidance();
   renderReadiness();
   renderFooterMessage();
 }
@@ -518,6 +583,7 @@ async function inspectPath() {
 
 function readSettings() {
   const windowPosition = elements.screenQuadrant.value;
+  rememberThresholdProfile();
   return {
     logicAppPath: elements.logicPath.value.trim(),
     portMode,
@@ -526,6 +592,7 @@ function readSettings() {
     maximizeLogicWindow: windowPosition === 'maximized',
     pxlogicDeviceId: elements.pxlogicDevice.value,
     pxlogicThresholdVolts: Number(elements.pxlogicThreshold.value),
+    pxlogicThresholdProfiles: JSON.parse(JSON.stringify(thresholdProfiles)),
   };
 }
 
@@ -601,16 +668,36 @@ elements.browseButton.addEventListener('click', async () => {
   persistSettings();
 });
 elements.pxlogicDevice.addEventListener('change', () => {
+  const previousDeviceId = currentHardware?.selectedDeviceId;
+  rememberThresholdProfile(previousDeviceId);
   if (currentHardware) currentHardware.selectedDeviceId = elements.pxlogicDevice.value;
+  applyThresholdProfile(elements.pxlogicDevice.value);
   renderHardware(currentHardware);
   persistSettings();
 });
 elements.pxlogicThreshold.addEventListener('input', () => {
+  elements.thresholdReference.value = 'custom';
+  elements.thresholdVerified.checked = false;
   updateThresholdLabel();
   renderState(currentState);
 });
 elements.pxlogicThreshold.addEventListener('change', () => {
   if (!elements.pxlogicThreshold.reportValidity()) return;
+  rememberThresholdProfile();
+  persistSettings();
+});
+elements.thresholdReference.addEventListener('change', () => {
+  const option = elements.thresholdReference.selectedOptions[0];
+  const volts = Number(option?.dataset.volts);
+  if (Number.isFinite(volts)) elements.pxlogicThreshold.value = String(volts);
+  elements.thresholdVerified.checked = false;
+  updateThresholdLabel();
+  rememberThresholdProfile();
+  persistSettings();
+});
+elements.thresholdVerified.addEventListener('change', () => {
+  updateThresholdLabel();
+  rememberThresholdProfile();
   persistSettings();
 });
 elements.pxlogicRescanButton.addEventListener('click', async () => {
@@ -687,11 +774,13 @@ async function initialize() {
     initial.settings.pxlogicThresholdVolts ??
       initial.settings.pxlogicComparatorThresholdVolts ?? 1.8,
   );
+  thresholdProfiles = JSON.parse(JSON.stringify(initial.settings.pxlogicThresholdProfiles || {}));
   elements.screenQuadrant.value = initial.settings.maximizeLogicWindow === false
     ? String(initial.settings.screenQuadrant)
     : 'maximized';
   setPortMode(initial.settings.portMode);
   renderHardware(initial.hardware);
+  applyThresholdProfile(initial.hardware?.selectedDeviceId);
   renderTelemetry(initial.captureTelemetry);
   if (initial.logs.length) {
     elements.logOutput.textContent = initial.logs.slice(-120).join('\n');

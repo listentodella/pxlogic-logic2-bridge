@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
@@ -43,6 +43,18 @@ struct ClientSettings {
     pxlogic_threshold_volts: f64,
     #[serde(default, rename = "pxlogicComparatorThresholdVolts", skip_serializing)]
     temporary_comparator_threshold_volts: Option<f64>,
+    #[serde(default)]
+    pxlogic_threshold_profiles: BTreeMap<String, ThresholdProfile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThresholdProfile {
+    volts: f64,
+    #[serde(default)]
+    verified: bool,
+    #[serde(default)]
+    reference: String,
 }
 
 fn default_maximize_logic_window() -> bool {
@@ -64,6 +76,7 @@ impl Default for ClientSettings {
             pxlogic_device_id: String::new(),
             pxlogic_threshold_volts: default_pxlogic_threshold_volts(),
             temporary_comparator_threshold_volts: None,
+            pxlogic_threshold_profiles: BTreeMap::new(),
         }
     }
 }
@@ -86,6 +99,13 @@ impl ClientSettings {
         {
             self.pxlogic_threshold_volts = default_pxlogic_threshold_volts();
         }
+        self.pxlogic_threshold_profiles
+            .retain(|device_id, profile| {
+                profile.reference = profile.reference.trim().to_string();
+                !device_id.trim().is_empty()
+                    && profile.volts.is_finite()
+                    && (0.0..=MAX_PXLOGIC_THRESHOLD_VOLTS).contains(&profile.volts)
+            });
         self
     }
 }
@@ -2726,6 +2746,14 @@ mod tests {
             pxlogic_device_id: "  usb:1234  ".to_string(),
             pxlogic_threshold_volts: 1.12,
             temporary_comparator_threshold_volts: None,
+            pxlogic_threshold_profiles: BTreeMap::from([(
+                "usb:1234".to_string(),
+                ThresholdProfile {
+                    volts: 1.12,
+                    verified: true,
+                    reference: "custom".to_string(),
+                },
+            )]),
         }
         .normalized();
         assert_eq!(settings.logic_app_path, "/Applications/Saleae Logic.app");
@@ -2735,6 +2763,7 @@ mod tests {
         assert!(settings.maximize_logic_window);
         assert_eq!(settings.pxlogic_device_id, "usb:1234");
         assert_eq!(settings.pxlogic_threshold_volts, 1.12);
+        assert!(settings.pxlogic_threshold_profiles["usb:1234"].verified);
     }
 
     #[test]
@@ -2746,6 +2775,21 @@ mod tests {
         assert!(settings.maximize_logic_window);
         assert_eq!(settings.pxlogic_device_id, "");
         assert_eq!(settings.pxlogic_threshold_volts, 1.8);
+        assert!(settings.pxlogic_threshold_profiles.is_empty());
+    }
+
+    #[test]
+    fn drops_invalid_per_device_threshold_profiles() {
+        let settings: ClientSettings = serde_json::from_str(
+            r#"{"logicAppPath":"","portMode":"auto","preferredPort":12472,"screenQuadrant":3,"pxlogicThresholdProfiles":{"usb:ready":{"volts":2.2,"verified":true,"reference":" fixture-stm32-spi "},"usb:invalid":{"volts":7.0,"verified":true,"reference":"custom"}}}"#,
+        )
+        .unwrap();
+        let settings = settings.normalized();
+        assert_eq!(settings.pxlogic_threshold_profiles.len(), 1);
+        let profile = &settings.pxlogic_threshold_profiles["usb:ready"];
+        assert_eq!(profile.volts, 2.2);
+        assert!(profile.verified);
+        assert_eq!(profile.reference, "fixture-stm32-spi");
     }
 
     #[test]
