@@ -297,7 +297,12 @@ A confirmed USB address change is reported separately as
 `PXLOGIC_USB_REENUMERATED`, with guidance that a USB controller, hub, or device
 reset usually does not mean the hardware is damaged. The Logic 2 GraphServer
 analyzer-cleanup assertion is classified as `GRAPH_ANALYZER_CLEANUP_CRASH`
-rather than a generic PXLogic capture-process exit.
+rather than a generic PXLogic capture-process exit. While the Bridge is running,
+macOS `graphio.log` is monitored from the current session's starting offset;
+historical assertions and rotated-log contents are not replayed as new faults.
+When the assertion is appended, the desktop client immediately keeps the
+recovery panel red and preserves the restart/diagnostics action even if the
+GraphServer process subsequently exits cleanly.
 
 `--dry-run` validates the app version, GraphServer resources, PXLogic helper,
 firmware, bitstreams, and native host build without launching Logic:

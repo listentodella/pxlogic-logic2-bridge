@@ -20,6 +20,7 @@ const {
 } = require('./lib/compatibility.cjs');
 const { normalizeEnabledChannels } = require('./lib/logic-format.cjs');
 const { GraphActionGuard } = require('./lib/graph-action-guard.cjs');
+const { GraphLogMonitor } = require('./lib/diagnostics.cjs');
 const { startWebSocketProxy } = require('./lib/websocket-proxy.cjs');
 
 const bridgeRoot = __dirname;
@@ -624,6 +625,13 @@ async function main() {
     throw new Error('The public proxy and private GraphServer ports must differ');
   }
 
+  const graphLogMonitor = new GraphLogMonitor(logPath, {
+    onFailure: event => console.error(bridgeEventLine(event)),
+  });
+  // Establish the session boundary before starting GraphServer. The file is
+  // intentionally append-only across Bridge runs, so historical assertions
+  // must never be replayed as a current failure.
+  graphLogMonitor.poll();
   const host = spawn(nativeHost, [
     runtime.sharedLibrary,
     runtime.pythonHome,
@@ -642,6 +650,7 @@ async function main() {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: process.platform === 'win32',
   });
+  graphLogMonitor.start();
   createLineReader(host.stderr, line => {
     console.error(line);
     const stats = parseInjectionStats(line);
@@ -730,6 +739,8 @@ async function main() {
         new Promise(resolve => setTimeout(resolve, 3000)),
       ]);
     }
+    graphLogMonitor.poll();
+    graphLogMonitor.stop();
   }
 }
 

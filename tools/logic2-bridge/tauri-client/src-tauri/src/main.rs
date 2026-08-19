@@ -1751,6 +1751,7 @@ fn capture_failure_message(code: &str) -> &'static str {
         "PXLOGIC_HELPER_START_FAILED" => "PXLogic 采集进程无法启动",
         "PXLOGIC_HELPER_EXITED" => "PXLogic 采集进程异常退出",
         "PXLOGIC_USB_REENUMERATED" => "检测到 PXLogic 的 USB 地址发生变化，常见于电脑 USB 控制器、Hub 或设备重置。采集已安全停止，设备通常未损坏。请重新扫描并初始化 Bridge。",
+        "GRAPH_ANALYZER_CLEANUP_CRASH" => "Logic 2 图形服务在采集中清理协议分析器时异常退出。PXLogic 设备通常未损坏；请重新初始化 Bridge，诊断信息已保留。",
         _ => "PXLogic 采集失败",
     }
 }
@@ -1908,6 +1909,40 @@ fn append_log(app: &AppHandle, source: &str, line: &str) {
                     error_code: Some(code),
                     recovery_action: event
                         .recovery_action
+                        .clone()
+                        .or_else(|| Some("restart-bridge".to_string())),
+                },
+            );
+        }
+        if event.event_type == "graphserver-failure" {
+            let code = event
+                .code
+                .clone()
+                .unwrap_or_else(|| "GRAPH_ANALYZER_CLEANUP_CRASH".to_string());
+            let actual_port = app
+                .state::<AppState>()
+                .bridge_state
+                .lock()
+                .ok()
+                .and_then(|state| state.actual_port);
+            if let Some(detail) = event.detail.as_deref() {
+                let detail_entry = format!("[diagnostic] {code}: {detail}");
+                if let Ok(mut logs) = app.state::<AppState>().logs.lock() {
+                    logs.push_back(detail_entry);
+                    while logs.len() > MAX_LOG_LINES {
+                        logs.pop_front();
+                    }
+                }
+            }
+            update_bridge_state(
+                app,
+                BridgeState {
+                    phase: "recovery".to_string(),
+                    actual_port,
+                    message: capture_failure_message(&code).to_string(),
+                    error_code: Some(code),
+                    recovery_action: event
+                        .recovery_action
                         .or_else(|| Some("restart-bridge".to_string())),
                 },
             );
@@ -1987,13 +2022,21 @@ fn monitor_bridge(app: AppHandle, token: u64) {
                 let quitting = app.state::<AppState>().quitting.load(Ordering::Acquire);
                 let graph_analyzer_cleanup_crash = app
                     .state::<AppState>()
-                    .logs
+                    .bridge_state
                     .lock()
-                    .map(|logs| {
-                        logs.iter()
-                            .any(|line| is_graph_analyzer_cleanup_crash(line))
+                    .map(|state| {
+                        state.error_code.as_deref() == Some("GRAPH_ANALYZER_CLEANUP_CRASH")
                     })
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                    || app
+                        .state::<AppState>()
+                        .logs
+                        .lock()
+                        .map(|logs| {
+                            logs.iter()
+                                .any(|line| is_graph_analyzer_cleanup_crash(line))
+                        })
+                        .unwrap_or(false);
                 match result {
                     _ if graph_analyzer_cleanup_crash && !quitting => {
                         update_bridge_state(&app, graph_analyzer_cleanup_failure(None))
@@ -2956,6 +2999,20 @@ mod tests {
         assert_eq!(event.detail.as_deref(), Some("rate"));
         assert_eq!(event.recovery_action.as_deref(), Some("restart-bridge"));
         assert!(parse_bridge_runtime_event("ordinary log").is_none());
+    }
+
+    #[test]
+    fn parses_graphserver_failure_event_for_recovery() {
+        let event = parse_bridge_runtime_event(
+            r#"[logic2-bridge:event] {"type":"graphserver-failure","code":"GRAPH_ANALYZER_CLEANUP_CRASH","detail":"assertion","recoveryAction":"restart-bridge"}"#,
+        )
+        .unwrap();
+        assert_eq!(event.event_type, "graphserver-failure");
+        assert_eq!(event.code.as_deref(), Some("GRAPH_ANALYZER_CLEANUP_CRASH"));
+        assert_eq!(event.detail.as_deref(), Some("assertion"));
+        assert_eq!(event.recovery_action.as_deref(), Some("restart-bridge"));
+        assert!(capture_failure_message("GRAPH_ANALYZER_CLEANUP_CRASH")
+            .contains("PXLogic 设备通常未损坏"));
     }
 
     #[test]

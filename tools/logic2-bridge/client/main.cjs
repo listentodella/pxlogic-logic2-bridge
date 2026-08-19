@@ -257,6 +257,7 @@ function captureFailureMessage(code) {
     PXLOGIC_HELPER_START_FAILED: 'PXLogic 采集进程无法启动',
     PXLOGIC_HELPER_EXITED: 'PXLogic 采集进程异常退出',
     PXLOGIC_USB_REENUMERATED: '检测到 PXLogic 的 USB 地址发生变化，常见于电脑 USB 控制器、Hub 或设备重置。采集已安全停止，设备通常未损坏。请重新扫描并初始化 Bridge。',
+    GRAPH_ANALYZER_CLEANUP_CRASH: 'Logic 2 图形服务在采集中清理协议分析器时异常退出。PXLogic 设备通常未损坏；请重新初始化 Bridge，诊断信息已保留。',
   };
   return messages[code] || 'PXLogic 采集失败';
 }
@@ -337,6 +338,14 @@ function appendLog(source, chunk) {
         recoveryAction: event.recoveryAction || 'restart-bridge',
       });
     }
+    if (event?.type === 'graphserver-failure') {
+      setBridgeState({
+        phase: 'recovery',
+        message: captureFailureMessage(event.code),
+        errorCode: event.code || 'GRAPH_ANALYZER_CLEANUP_CRASH',
+        recoveryAction: event.recoveryAction || 'restart-bridge',
+      });
+    }
     const graphFailure = classifyGraphServerFailure(line);
     if (graphFailure) {
       setBridgeState({
@@ -409,12 +418,20 @@ function startBridge(rawSettings) {
   bridgeProcess.once('exit', (code, signal) => {
     bridgeProcess = undefined;
     const graphFailure = classifyGraphServerFailure(logLines);
-    if (graphFailure && !quitting) {
+    const reportedGraphFailure = bridgeState.errorCode === 'GRAPH_ANALYZER_CLEANUP_CRASH'
+      ? {
+        code: 'GRAPH_ANALYZER_CLEANUP_CRASH',
+        message: captureFailureMessage('GRAPH_ANALYZER_CLEANUP_CRASH'),
+        recoveryAction: 'restart-bridge',
+      }
+      : null;
+    if ((graphFailure || reportedGraphFailure) && !quitting) {
+      const failure = graphFailure || reportedGraphFailure;
       setBridgeState({
         phase: 'recovery', actualPort: null,
-        message: graphFailure.message,
-        errorCode: graphFailure.code,
-        recoveryAction: graphFailure.recoveryAction,
+        message: failure.message,
+        errorCode: failure.code,
+        recoveryAction: failure.recoveryAction,
       });
       return;
     }
