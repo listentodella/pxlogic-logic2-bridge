@@ -193,11 +193,12 @@ actual value to Logic 2. The port is not fixed by Logic. In fixed mode the
 selected value is preferred; if it is occupied, the bridge falls back to an
 available port and reports the actual endpoint in the client.
 
-CI builds are ad-hoc signed so the application bundle and packaged resources
-can be checked for integrity, but they are not Developer ID signed or notarized.
-macOS may require the first launch through Finder's `Open` context-menu action.
-Public distribution without that prompt requires Developer ID signing and
-Apple notarization.
+CI builds default to ad-hoc signing so the application bundle and packaged
+resources can be checked for integrity. A tag build can opt into Developer ID
+signing and Apple notarization by setting the repository variable
+`PXLOGIC_MACOS_SIGNING_MODE=notarized` and configuring the certificate and
+notary credentials documented in `../../docs/macos-distribution.md`. Ad-hoc builds
+may require the first launch through Finder's `Open` context-menu action.
 
 ## Command-line development
 

@@ -8,6 +8,7 @@ on:
       - "v*"
     paths:
       - ".github/workflows/build-logic2-bridge.yml"
+      - "docs/macos-distribution.md"
       - "tools/logic2-bridge/**"
       - "src-tauri/src/bin/usb_smoke.rs"
       - "crates/pxlogic-core/**"
@@ -41,6 +42,14 @@ on:
         required: false
         default: "2.4.46"
         type: string
+      macos_signing_mode:
+        description: macOS application signing mode
+        required: false
+        default: adhoc
+        type: choice
+        options:
+          - adhoc
+          - notarized
 
 concurrency:
   group: logic2-bridge-${{ github.workflow }}-${{ github.ref }}
@@ -48,6 +57,9 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  PXLOGIC_MACOS_SIGNING_MODE: ${{ vars.PXLOGIC_MACOS_SIGNING_MODE }}
 
 jobs:
   portable-layer:
@@ -398,10 +410,100 @@ jobs:
           npx tauri build --target aarch64-apple-darwin \
             --config src-tauri/tauri.macos.conf.json --bundles app
 
-      - name: Ad-hoc sign application bundle
+      - name: Resolve macOS signing mode
+        id: signing-mode
+        shell: bash
+        env:
+          DISPATCH_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.macos_signing_mode || '' }}
         run: |
-          codesign --force --deep --sign - \
-            "tools/logic2-bridge/tauri-client/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app"
+          set -euo pipefail
+          mode="${DISPATCH_MODE:-${PXLOGIC_MACOS_SIGNING_MODE:-adhoc}}"
+          case "$mode" in
+            adhoc|notarized) ;;
+            *) echo "Unsupported macOS signing mode: $mode" >&2; exit 1 ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Using macOS signing mode: $mode"
+
+      - name: Validate notarization credentials
+        if: steps.signing-mode.outputs.mode == 'notarized'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: node tools/logic2-bridge/scripts/verify-macos-release.cjs --mode notarized
+
+      - name: Import Developer ID certificate
+        if: steps.signing-mode.outputs.mode == 'notarized'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/pxlogic-bridge-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/pxlogic-bridge-signing.p12"
+          keychain_password="$(openssl rand -base64 32)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s -k "$keychain_password" "$keychain_path"
+          security list-keychain -d user -s "$keychain_path"
+          echo "MACOS_SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+
+      - name: Sign application bundle
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          app_root="tools/logic2-bridge/tauri-client/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app"
+          if [[ "${{ steps.signing-mode.outputs.mode }}" == "notarized" ]]; then
+            codesign --force --deep --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$app_root"
+          else
+            codesign --force --deep --sign - "$app_root"
+          fi
+          codesign --verify --deep --strict --verbose=2 "$app_root"
+
+      - name: Prepare notarization archive
+        if: steps.signing-mode.outputs.mode == 'notarized'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "tools/logic2-bridge/tauri-client/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app" \
+            "dist/pxlogic-logic2-bridge-macos-arm64-notarization.zip"
+
+      - name: Submit application for notarization
+        if: steps.signing-mode.outputs.mode == 'notarized'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: |
+          xcrun notarytool submit \
+            "dist/pxlogic-logic2-bridge-macos-arm64-notarization.zip" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_PASSWORD" \
+            --wait
+
+      - name: Staple notarization ticket
+        if: steps.signing-mode.outputs.mode == 'notarized'
+        run: |
+          app_root="tools/logic2-bridge/tauri-client/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app"
+          xcrun stapler staple "$app_root"
 
       - name: Verify application bundle
         run: |
@@ -425,7 +527,9 @@ jobs:
           test -f "$resources/resources/bitstreams/hspi_ddr.bin"
           test -f "$resources/resources/bitstreams/hspi_ddr_RST.bin"
           test -f "$resources/resources/firmware/SCI_LOGIC.bin"
-          codesign --verify --deep --strict --verbose=2 "$app_root"
+          node tools/logic2-bridge/scripts/verify-macos-release.cjs \
+            --mode "${{ steps.signing-mode.outputs.mode }}" \
+            --bundle "$app_root"
 
       - name: Archive portable application
         run: |
@@ -435,6 +539,14 @@ jobs:
             "tools/logic2-bridge/tauri-client/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app" \
             "dist/pxlogic-logic2-bridge-macos-arm64.zip"
           unzip -t "dist/pxlogic-logic2-bridge-macos-arm64.zip"
+
+      - name: Remove temporary signing keychain
+        if: always() && steps.signing-mode.outputs.mode == 'notarized'
+        run: |
+          if [[ -n "${MACOS_SIGNING_KEYCHAIN:-}" ]] && security list-keychains -d user \
+            | grep -Fq "$MACOS_SIGNING_KEYCHAIN"; then
+            security delete-keychain "$MACOS_SIGNING_KEYCHAIN"
+          fi
 
       - name: Upload desktop client
         uses: actions/upload-artifact@v7
