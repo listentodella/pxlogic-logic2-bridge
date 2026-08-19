@@ -53,6 +53,7 @@ test('experimental profile launch keeps an explicit one-shot confirmation contra
   assert.match(app, /phase: currentState\.phase/);
   assert.match(app, /experimentalConfirmationToken\.confirmed = true/);
   assert.match(app, /!elements\.experimentalConfirmationCheckbox\.checked/);
+  assert.match(app, /if \(elements\.experimentalConfirmation\.open\) elements\.experimentalConfirmation\.close\(\)/);
   assert.match(app, /function requestExperimentalConfirmation\(\)/);
   assert.match(app, /function consumeExperimentalConfirmationFingerprint\(\)/);
   assert.match(app, /pendingProfileFingerprint,/);

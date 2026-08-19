@@ -409,6 +409,7 @@ function renderState(state) {
   currentState = state;
   if (experimentalConfirmationToken && experimentalConfirmationToken.phase !== state.phase) {
     clearExperimentalConfirmation();
+    if (elements.experimentalConfirmation.open) elements.experimentalConfirmation.close();
   }
   elements.status.className = `status status-${state.phase}`;
   elements.statusLabel.textContent = state.message;
