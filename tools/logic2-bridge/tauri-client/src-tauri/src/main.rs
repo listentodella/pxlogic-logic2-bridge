@@ -215,11 +215,86 @@ impl Default for BridgeState {
 struct BridgeRuntimeEvent {
     #[serde(rename = "type")]
     event_type: String,
-    code: String,
+    #[serde(default)]
+    code: Option<String>,
     #[serde(default)]
     detail: Option<String>,
     #[serde(default)]
     recovery_action: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    failed: Option<bool>,
+    #[serde(default)]
+    sample_rate_hz: Option<u64>,
+    #[serde(default)]
+    enabled_channels: Option<Vec<u8>>,
+    #[serde(default)]
+    channel_span: Option<u64>,
+    #[serde(default)]
+    threshold_volts: Option<f64>,
+    #[serde(default)]
+    trigger_description: Option<String>,
+    #[serde(default)]
+    cross_chunks: Option<u64>,
+    #[serde(default)]
+    converted_bytes: Option<u64>,
+    #[serde(default)]
+    window_count: Option<u64>,
+    #[serde(default)]
+    sample_count: Option<u64>,
+    #[serde(default)]
+    callback_count: Option<u64>,
+    #[serde(default)]
+    queued_bytes: Option<u64>,
+    #[serde(default)]
+    injected_bytes: Option<u64>,
+    #[serde(default)]
+    underflows: Option<u64>,
+    #[serde(default)]
+    dropped_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureTelemetry {
+    status: String,
+    sample_rate_hz: Option<u64>,
+    enabled_channels: Vec<u8>,
+    channel_span: Option<u64>,
+    threshold_volts: Option<f64>,
+    trigger_description: Option<String>,
+    cross_chunks: u64,
+    converted_bytes: u64,
+    window_count: Option<u64>,
+    sample_count: Option<u64>,
+    callback_count: Option<u64>,
+    queued_bytes: Option<u64>,
+    injected_bytes: Option<u64>,
+    underflows: Option<u64>,
+    dropped_bytes: Option<u64>,
+}
+
+impl Default for CaptureTelemetry {
+    fn default() -> Self {
+        Self {
+            status: "idle".to_string(),
+            sample_rate_hz: None,
+            enabled_channels: Vec::new(),
+            channel_span: None,
+            threshold_volts: None,
+            trigger_description: None,
+            cross_chunks: 0,
+            converted_bytes: 0,
+            window_count: None,
+            sample_count: None,
+            callback_count: None,
+            queued_bytes: None,
+            injected_bytes: None,
+            underflows: None,
+            dropped_bytes: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -233,6 +308,7 @@ struct DiagnosticsReport {
     settings: ClientSettings,
     logic: LogicInspection,
     bridge_state: BridgeState,
+    capture_telemetry: CaptureTelemetry,
     recent_logs: Vec<String>,
     graph_log_tail: Option<String>,
     local_compatibility_manifest: Option<serde_json::Value>,
@@ -245,6 +321,7 @@ struct InitialState {
     applications: Vec<LogicInspection>,
     hardware: PxlogicHardwareState,
     bridge_state: BridgeState,
+    capture_telemetry: CaptureTelemetry,
     logs: Vec<String>,
 }
 
@@ -304,6 +381,7 @@ struct RuntimeState {
 struct AppState {
     runtime: Mutex<RuntimeState>,
     bridge_state: Mutex<BridgeState>,
+    capture_telemetry: Mutex<CaptureTelemetry>,
     logs: Mutex<VecDeque<String>>,
     next_token: AtomicU64,
     quitting: AtomicBool,
@@ -314,6 +392,7 @@ impl Default for AppState {
         Self {
             runtime: Mutex::new(RuntimeState::default()),
             bridge_state: Mutex::new(BridgeState::default()),
+            capture_telemetry: Mutex::new(CaptureTelemetry::default()),
             logs: Mutex::new(VecDeque::new()),
             next_token: AtomicU64::new(1),
             quitting: AtomicBool::new(false),
@@ -1660,6 +1739,72 @@ fn classify_start_failure(message: &str) -> (&'static str, &'static str) {
     }
 }
 
+fn apply_capture_runtime_event(
+    telemetry: &mut CaptureTelemetry,
+    event: &BridgeRuntimeEvent,
+) -> bool {
+    match event.event_type.as_str() {
+        "capture-starting" => {
+            *telemetry = CaptureTelemetry {
+                status: "starting".to_string(),
+                sample_rate_hz: event.sample_rate_hz,
+                enabled_channels: event.enabled_channels.clone().unwrap_or_default(),
+                channel_span: event.channel_span,
+                threshold_volts: event.threshold_volts,
+                trigger_description: event.trigger_description.clone(),
+                ..CaptureTelemetry::default()
+            };
+        }
+        "capture-started" => {
+            telemetry.status = "streaming".to_string();
+            telemetry.sample_rate_hz = event.sample_rate_hz.or(telemetry.sample_rate_hz);
+            if let Some(channels) = event.enabled_channels.as_ref() {
+                telemetry.enabled_channels.clone_from(channels);
+            }
+            telemetry.channel_span = event.channel_span.or(telemetry.channel_span);
+            telemetry.threshold_volts = event.threshold_volts.or(telemetry.threshold_volts);
+            if let Some(trigger) = event.trigger_description.as_ref() {
+                telemetry.trigger_description = Some(trigger.clone());
+            }
+        }
+        "capture-progress" => {
+            if let Some(value) = event.cross_chunks {
+                telemetry.cross_chunks = value;
+            }
+            if let Some(value) = event.converted_bytes {
+                telemetry.converted_bytes = value;
+            }
+            telemetry.window_count = event.window_count.or(telemetry.window_count);
+            telemetry.sample_count = event.sample_count.or(telemetry.sample_count);
+        }
+        "injection-progress" => {
+            telemetry.callback_count = event.callback_count.or(telemetry.callback_count);
+            telemetry.queued_bytes = event.queued_bytes.or(telemetry.queued_bytes);
+            telemetry.injected_bytes = event.injected_bytes.or(telemetry.injected_bytes);
+            telemetry.underflows = event.underflows.or(telemetry.underflows);
+            telemetry.dropped_bytes = event.dropped_bytes.or(telemetry.dropped_bytes);
+        }
+        "capture-ended" => {
+            telemetry.status = event.status.clone().unwrap_or_else(|| {
+                if event.failed.unwrap_or(false) {
+                    "error".to_string()
+                } else {
+                    "stopped".to_string()
+                }
+            });
+            if let Some(value) = event.cross_chunks {
+                telemetry.cross_chunks = value;
+            }
+            if let Some(value) = event.converted_bytes {
+                telemetry.converted_bytes = value;
+            }
+        }
+        "capture-unavailable" => telemetry.status = "error".to_string(),
+        _ => return false,
+    }
+    true
+}
+
 fn append_log(app: &AppHandle, source: &str, line: &str) {
     if line.is_empty() {
         return;
@@ -1673,7 +1818,22 @@ fn append_log(app: &AppHandle, source: &str, line: &str) {
     }
     let _ = app.emit("bridge-log", &entry);
     if let Some(event) = parse_bridge_runtime_event(line) {
+        let capture_telemetry = app
+            .state::<AppState>()
+            .capture_telemetry
+            .lock()
+            .ok()
+            .and_then(|mut telemetry| {
+                apply_capture_runtime_event(&mut telemetry, &event).then(|| telemetry.clone())
+            });
+        if let Some(telemetry) = capture_telemetry {
+            let _ = app.emit("capture-telemetry", telemetry);
+        }
         if event.event_type == "capture-unavailable" {
+            let code = event
+                .code
+                .clone()
+                .unwrap_or_else(|| "PXLOGIC_CAPTURE_FAILED".to_string());
             let actual_port = app
                 .state::<AppState>()
                 .bridge_state
@@ -1681,7 +1841,7 @@ fn append_log(app: &AppHandle, source: &str, line: &str) {
                 .ok()
                 .and_then(|state| state.actual_port);
             if let Some(detail) = event.detail.as_deref() {
-                let detail_entry = format!("[diagnostic] {}: {detail}", event.code);
+                let detail_entry = format!("[diagnostic] {code}: {detail}");
                 if let Ok(mut logs) = app.state::<AppState>().logs.lock() {
                     logs.push_back(detail_entry);
                     while logs.len() > MAX_LOG_LINES {
@@ -1694,8 +1854,8 @@ fn append_log(app: &AppHandle, source: &str, line: &str) {
                 BridgeState {
                     phase: "recovery".to_string(),
                     actual_port,
-                    message: capture_failure_message(&event.code).to_string(),
-                    error_code: Some(event.code),
+                    message: capture_failure_message(&code).to_string(),
+                    error_code: Some(code),
                     recovery_action: event
                         .recovery_action
                         .or_else(|| Some("restart-bridge".to_string())),
@@ -1964,6 +2124,11 @@ async fn client_initial_state(app: AppHandle) -> Result<InitialState, String> {
         .lock()
         .map_err(|_| "Bridge 状态已损坏".to_string())?
         .clone();
+    let capture_telemetry = state
+        .capture_telemetry
+        .lock()
+        .map_err(|_| "采集状态已损坏".to_string())?
+        .clone();
     let logs = state
         .logs
         .lock()
@@ -1976,6 +2141,7 @@ async fn client_initial_state(app: AppHandle) -> Result<InitialState, String> {
         applications,
         hardware,
         bridge_state,
+        capture_telemetry,
         logs,
     })
 }
@@ -2079,6 +2245,11 @@ async fn bridge_start(app: AppHandle, settings: ClientSettings) -> Result<Bridge
             recovery_action: None,
         },
     );
+    let capture_telemetry = CaptureTelemetry::default();
+    if let Ok(mut current) = app.state::<AppState>().capture_telemetry.lock() {
+        *current = capture_telemetry.clone();
+    }
+    let _ = app.emit("capture-telemetry", capture_telemetry);
 
     let result = start_bridge_inner(&app, settings);
     if result.is_err() {
@@ -2317,6 +2488,12 @@ fn diagnostics_report(app: &AppHandle) -> Result<DiagnosticsReport, String> {
         .lock()
         .map_err(|_| "Bridge 状态已损坏".to_string())?
         .clone();
+    let capture_telemetry = app
+        .state::<AppState>()
+        .capture_telemetry
+        .lock()
+        .map_err(|_| "采集状态已损坏".to_string())?
+        .clone();
     let recent_logs = app
         .state::<AppState>()
         .logs
@@ -2345,6 +2522,7 @@ fn diagnostics_report(app: &AppHandle) -> Result<DiagnosticsReport, String> {
         settings,
         logic,
         bridge_state,
+        capture_telemetry,
         recent_logs,
         graph_log_tail,
         local_compatibility_manifest,
@@ -2608,10 +2786,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(event.event_type, "capture-unavailable");
-        assert_eq!(event.code, "PXLOGIC_RATE_MISMATCH");
+        assert_eq!(event.code.as_deref(), Some("PXLOGIC_RATE_MISMATCH"));
         assert_eq!(event.detail.as_deref(), Some("rate"));
         assert_eq!(event.recovery_action.as_deref(), Some("restart-bridge"));
         assert!(parse_bridge_runtime_event("ordinary log").is_none());
+    }
+
+    #[test]
+    fn aggregates_capture_and_native_injection_telemetry() {
+        let mut telemetry = CaptureTelemetry::default();
+        let started = parse_bridge_runtime_event(
+            r#"[logic2-bridge:event] {"type":"capture-started","sampleRateHz":50000000,"enabledChannels":[0,4],"channelSpan":5,"thresholdVolts":2.2,"triggerDescription":"D4 rising"}"#,
+        )
+        .unwrap();
+        assert!(apply_capture_runtime_event(&mut telemetry, &started));
+        assert_eq!(telemetry.status, "streaming");
+        assert_eq!(telemetry.sample_rate_hz, Some(50_000_000));
+        assert_eq!(telemetry.enabled_channels, vec![0, 4]);
+        assert_eq!(telemetry.threshold_volts, Some(2.2));
+
+        let injection = parse_bridge_runtime_event(
+            r#"[logic2-bridge:event] {"type":"injection-progress","callbackCount":128,"queuedBytes":131072,"injectedBytes":8388608,"underflows":2,"droppedBytes":0}"#,
+        )
+        .unwrap();
+        assert!(apply_capture_runtime_event(&mut telemetry, &injection));
+        assert_eq!(telemetry.callback_count, Some(128));
+        assert_eq!(telemetry.injected_bytes, Some(8_388_608));
+        assert_eq!(telemetry.underflows, Some(2));
+        assert_eq!(telemetry.dropped_bytes, Some(0));
     }
 
     #[test]

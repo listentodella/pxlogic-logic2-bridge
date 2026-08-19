@@ -31,6 +31,7 @@ let bridgeProcess;
 let bridgeState = {
   phase: 'stopped', actualPort: null, message: '待机', errorCode: null, recoveryAction: null,
 };
+let captureTelemetry = defaultCaptureTelemetry();
 let logLines = [];
 let quitting = false;
 
@@ -239,6 +240,65 @@ function captureFailureMessage(code) {
   return messages[code] || 'PXLogic 采集失败';
 }
 
+function defaultCaptureTelemetry() {
+  return {
+    status: 'idle',
+    sampleRateHz: null,
+    enabledChannels: [],
+    channelSpan: null,
+    thresholdVolts: null,
+    triggerDescription: null,
+    crossChunks: 0,
+    convertedBytes: 0,
+    windowCount: null,
+    sampleCount: null,
+    callbackCount: null,
+    queuedBytes: null,
+    injectedBytes: null,
+    underflows: null,
+    droppedBytes: null,
+  };
+}
+
+function applyCaptureRuntimeEvent(event) {
+  if (event.type === 'capture-starting') {
+    captureTelemetry = {
+      ...defaultCaptureTelemetry(),
+      status: 'starting',
+      sampleRateHz: event.sampleRateHz ?? null,
+      enabledChannels: event.enabledChannels || [],
+      thresholdVolts: event.thresholdVolts ?? null,
+      triggerDescription: event.triggerDescription ?? null,
+    };
+  } else if (event.type === 'capture-started') {
+    Object.assign(captureTelemetry, {
+      status: 'streaming',
+      sampleRateHz: event.sampleRateHz ?? captureTelemetry.sampleRateHz,
+      enabledChannels: event.enabledChannels || captureTelemetry.enabledChannels,
+      channelSpan: event.channelSpan ?? captureTelemetry.channelSpan,
+      thresholdVolts: event.thresholdVolts ?? captureTelemetry.thresholdVolts,
+      triggerDescription: event.triggerDescription ?? captureTelemetry.triggerDescription,
+    });
+  } else if (event.type === 'capture-progress') {
+    for (const key of ['crossChunks', 'convertedBytes', 'windowCount', 'sampleCount']) {
+      if (event[key] !== undefined) captureTelemetry[key] = event[key];
+    }
+  } else if (event.type === 'injection-progress') {
+    for (const key of ['callbackCount', 'queuedBytes', 'injectedBytes', 'underflows', 'droppedBytes']) {
+      if (event[key] !== undefined) captureTelemetry[key] = event[key];
+    }
+  } else if (event.type === 'capture-ended') {
+    captureTelemetry.status = event.status || (event.failed ? 'error' : 'stopped');
+    if (event.crossChunks !== undefined) captureTelemetry.crossChunks = event.crossChunks;
+    if (event.convertedBytes !== undefined) captureTelemetry.convertedBytes = event.convertedBytes;
+  } else if (event.type === 'capture-unavailable') {
+    captureTelemetry.status = 'error';
+  } else {
+    return;
+  }
+  emit('bridge:telemetry', { ...captureTelemetry });
+}
+
 function appendLog(source, chunk) {
   const lines = String(chunk).split(/\r?\n/).filter(Boolean);
   for (const line of lines) {
@@ -247,6 +307,7 @@ function appendLog(source, chunk) {
     if (logLines.length > 500) logLines.shift();
     emit('bridge:log', entry);
     const event = parseBridgeRuntimeEvent(line);
+    if (event) applyCaptureRuntimeEvent(event);
     if (event?.type === 'capture-unavailable') {
       setBridgeState({
         phase: 'recovery',
@@ -293,6 +354,8 @@ function startBridge(rawSettings) {
     phase: 'starting', actualPort: null, message: '正在启动',
     errorCode: null, recoveryAction: null,
   });
+  captureTelemetry = defaultCaptureTelemetry();
+  emit('bridge:telemetry', { ...captureTelemetry });
   logLines = [];
   bridgeProcess = spawn(process.execPath, args, {
     cwd: bridgeRoot(),
@@ -384,6 +447,7 @@ async function exportDiagnostics() {
     settings,
     logic: inspectLogicApp(settings.logicAppPath),
     bridgeState,
+    captureTelemetry,
     recentLogs: logLines,
     graphLogTail: readTextTail(path.join(logDirectory, 'graphio.log')),
   };
@@ -469,7 +533,7 @@ ipcMain.handle('client:initial-state', () => {
     settings.pxlogicDeviceId = hardware.selectedDeviceId;
     saveSettings(settings);
   }
-  return { settings, applications, hardware, bridgeState, logs: logLines };
+  return { settings, applications, hardware, bridgeState, captureTelemetry, logs: logLines };
 });
 ipcMain.handle('client:save-settings', (_event, settings) => saveSettings(settings));
 ipcMain.handle('logic:scan', (_event, savedPath) => discoverLogicApps(savedPath));

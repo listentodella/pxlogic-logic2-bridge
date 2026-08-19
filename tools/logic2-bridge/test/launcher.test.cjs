@@ -15,10 +15,31 @@ const {
   nativeGraphStartupTimeoutMs,
   nativeHookArguments,
   parseArguments,
+  parseInjectionStats,
   resolveRuntimeVersion,
   waitForNativeGraph,
   windowsMaximizeScript,
 } = require('../index.cjs');
+
+test('parses native injection quality counters', () => {
+  assert.deepEqual(
+    parseInjectionStats(
+      '[logic2-bridge:inject] callback=128 buffer=65536 injected=65536 ' +
+      'queued=131072 total=8388608 underflows=2 dropped=4096',
+    ),
+    {
+      type: 'injection-progress',
+      callbackCount: 128,
+      callbackBufferBytes: 65536,
+      callbackInjectedBytes: 65536,
+      queuedBytes: 131072,
+      injectedBytes: 8388608,
+      underflows: 2,
+      droppedBytes: 4096,
+    },
+  );
+  assert.equal(parseInjectionStats('unrelated output'), null);
+});
 
 test('uses an automatically allocated public port by default', () => {
   assert.equal(parseArguments([]).port, 0);

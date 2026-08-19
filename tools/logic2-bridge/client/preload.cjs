@@ -15,5 +15,6 @@ contextBridge.exposeInMainWorld('pxlogicBridge', {
   exportDiagnostics: () => ipcRenderer.invoke('diagnostics:export'),
   openLogs: () => ipcRenderer.invoke('logs:open'),
   onState: callback => ipcRenderer.on('bridge:state', (_event, state) => callback(state)),
+  onTelemetry: callback => ipcRenderer.on('bridge:telemetry', (_event, state) => callback(state)),
   onLog: callback => ipcRenderer.on('bridge:log', (_event, line) => callback(line)),
 });

@@ -82,7 +82,7 @@ test('keeps nominal voltage and GraphServer trigger semantics', () => {
   }), /^D2 positive pulse/);
 });
 
-test('observes a Logic trigger without storing PXLogic hardware trigger state', () => {
+test('records the Logic trigger description without enabling a PXLogic hardware trigger', () => {
   const controller = new PxlogicCaptureController({
     enabledChannels: [0, 1, 2, 3, 4],
     sampleRateHz: 50_000_000,
@@ -97,6 +97,7 @@ test('observes a Logic trigger without storing PXLogic hardware trigger state', 
     enabledChannels: [0, 1, 2, 3, 4],
     sampleRateHz: 50_000_000,
     thresholdVolts: 1.8,
+    triggerDescription: 'D4 rising',
     logicSoftwareGlitchFilterWidths: {},
   });
 });

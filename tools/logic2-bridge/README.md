@@ -167,6 +167,14 @@ supported. It also keeps the session mapping visible: `Demo Logic Pro 16` is
 the Logic 2 compatibility device, while the selected PXLogic remains the real
 sample source.
 
+During a capture, the desktop client shows the helper's effective sample rate,
+enabled channels, comparator threshold, converted bytes, and the native host's
+injected/queued bytes, callback underflows, and dropped bytes. A clean quality
+status is shown only after native injection counters have been observed. The
+trigger field reports the Logic 2 GraphServer trigger configuration; it does
+not claim that a trigger fired because GraphServer does not expose that event
+to the Bridge.
+
 Click `Start Logic 2` after a verified profile is shown. For a locally analyzed
 candidate, review the automatic-candidate status and use `启动实验验证`; an
 unsupported result is not injected.

@@ -143,6 +143,26 @@
         </div>
       </section>
 
+      <section class="settings-section capture-quality-section">
+        <div class="section-heading compact-heading">
+          <div>
+            <h2>采集质量</h2>
+            <p id="capture-summary">等待 Logic 2 开始采集</p>
+          </div>
+        </div>
+        <div class="telemetry-grid" aria-live="polite">
+          <div><span>状态</span><strong id="capture-status">未采集</strong></div>
+          <div><span>实际采样率</span><strong id="capture-rate">--</strong></div>
+          <div><span>启用通道</span><strong id="capture-channels">--</strong></div>
+          <div><span>比较阈值</span><strong id="capture-threshold">--</strong></div>
+          <div><span>已转换</span><strong id="capture-converted">--</strong></div>
+          <div><span>已注入</span><strong id="capture-injected">--</strong></div>
+          <div><span>注入队列</span><strong id="capture-queued">--</strong></div>
+          <div><span>丢弃 / 下溢</span><strong id="capture-loss">待统计</strong></div>
+        </div>
+        <p class="telemetry-detail">Logic 2 触发设置：<strong id="capture-trigger">--</strong></p>
+      </section>
+
       <section class="activity-section">
         <div class="activity-heading">
           <div>

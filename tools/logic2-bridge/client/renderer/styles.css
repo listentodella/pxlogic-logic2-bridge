@@ -417,6 +417,56 @@ select:focus {
   color: #205c3a;
 }
 
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  row-gap: 16px;
+  margin-top: 2px;
+}
+
+.telemetry-grid > div {
+  min-width: 0;
+  padding-right: 16px;
+}
+
+.telemetry-grid span,
+.telemetry-grid strong {
+  display: block;
+}
+
+.telemetry-grid span {
+  margin-bottom: 4px;
+  color: #7a7f87;
+  font-size: 11px;
+}
+
+.telemetry-grid strong {
+  min-height: 17px;
+  overflow: hidden;
+  color: #33363b;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.telemetry-grid .telemetry-ok { color: #276b44; }
+.telemetry-grid .telemetry-warn { color: #805c12; }
+.telemetry-grid .telemetry-error { color: #a03b2d; }
+.telemetry-grid .telemetry-muted { color: #6b7078; }
+
+.telemetry-detail {
+  margin: 14px 0 0;
+  padding-top: 11px;
+  color: #6b7078;
+  border-top: 1px solid #dde0e4;
+  font-size: 11px;
+}
+
+.telemetry-detail strong {
+  color: #33363b;
+}
+
 .activity-section {
   border-bottom: 0;
 }

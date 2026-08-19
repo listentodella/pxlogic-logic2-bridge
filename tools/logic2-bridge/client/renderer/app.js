@@ -20,6 +20,7 @@ function createTauriApi() {
     openLogs: () => invoke('logs_open'),
     openManual: () => invoke('manual_open'),
     onState: callback => void listen('bridge-state', event => callback(event.payload)),
+    onTelemetry: callback => void listen('capture-telemetry', event => callback(event.payload)),
     onLog: callback => void listen('bridge-log', event => callback(event.payload)),
   };
 }
@@ -64,6 +65,16 @@ const elements = {
   portSummary: document.querySelector('#port-summary'),
   screenQuadrant: document.querySelector('#screen-quadrant'),
   endpointLabel: document.querySelector('#endpoint-label'),
+  captureSummary: document.querySelector('#capture-summary'),
+  captureStatus: document.querySelector('#capture-status'),
+  captureRate: document.querySelector('#capture-rate'),
+  captureChannels: document.querySelector('#capture-channels'),
+  captureThreshold: document.querySelector('#capture-threshold'),
+  captureConverted: document.querySelector('#capture-converted'),
+  captureInjected: document.querySelector('#capture-injected'),
+  captureQueued: document.querySelector('#capture-queued'),
+  captureLoss: document.querySelector('#capture-loss'),
+  captureTrigger: document.querySelector('#capture-trigger'),
   logOutput: document.querySelector('#log-output'),
   recoveryPanel: document.querySelector('#recovery-panel'),
   recoveryTitle: document.querySelector('#recovery-title'),
@@ -79,6 +90,7 @@ let portMode = 'auto';
 let currentState = { phase: 'stopped', actualPort: null, message: '待机' };
 let currentInspection = null;
 let currentHardware = null;
+let currentTelemetry = { status: 'idle', enabledChannels: [] };
 let hardwareScanning = false;
 let logicAnalyzing = false;
 let inspectionSequence = 0;
@@ -225,6 +237,101 @@ function renderRecoveryPanel() {
   elements.recoveryMessage.textContent = currentState.message;
   elements.recoveryCode.textContent = currentState.errorCode || 'BRIDGE_ERROR';
   elements.recoveryPanel.classList.toggle('recovery-required', needsRecovery());
+}
+
+function formatRate(rate) {
+  if (!Number.isFinite(rate)) return '--';
+  if (rate >= 1_000_000) return `${Number((rate / 1_000_000).toFixed(3))} MHz`;
+  if (rate >= 1_000) return `${Number((rate / 1_000).toFixed(3))} kHz`;
+  return `${rate} Hz`;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return '--';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let value = Math.max(0, bytes);
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const precision = value >= 100 || unit === 0 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(precision)} ${units[unit]}`;
+}
+
+function renderTelemetry(telemetry) {
+  currentTelemetry = telemetry || { status: 'idle', enabledChannels: [] };
+  const statusLabels = {
+    idle: '未采集',
+    starting: '准备中',
+    streaming: '采集中',
+    stopped: '已停止',
+    error: '异常',
+  };
+  const droppedKnown = Number.isFinite(currentTelemetry.droppedBytes);
+  const underflowsKnown = Number.isFinite(currentTelemetry.underflows);
+  const droppedBytes = droppedKnown ? currentTelemetry.droppedBytes : 0;
+  const underflows = underflowsKnown ? currentTelemetry.underflows : 0;
+  let quality = 'muted';
+  let summary = '等待 Logic 2 开始采集';
+  if (currentTelemetry.status === 'starting') {
+    quality = 'warn';
+    summary = '正在准备 PXLogic 采集链路';
+  } else if (currentTelemetry.status === 'error') {
+    quality = 'error';
+    summary = '采集链路异常，请查看故障信息';
+  } else if (droppedBytes > 0) {
+    quality = 'error';
+    summary = '检测到 native 注入数据丢弃';
+  } else if (underflows > 0) {
+    quality = 'warn';
+    summary = '检测到 GraphServer 回调供数不足';
+  } else if (['streaming', 'stopped'].includes(currentTelemetry.status) &&
+             droppedKnown && underflowsKnown) {
+    quality = 'ok';
+    summary = currentTelemetry.status === 'streaming'
+      ? '采集链路正常，尚未检测到丢弃或下溢'
+      : '本次统计未检测到丢弃或下溢';
+  } else if (currentTelemetry.status === 'streaming') {
+    quality = 'ok';
+    summary = 'PXLogic 正在转换数据，等待 native 注入统计';
+  } else if (currentTelemetry.status === 'stopped') {
+    summary = '采集已停止';
+  }
+
+  elements.captureSummary.textContent = summary;
+  elements.captureStatus.textContent = statusLabels[currentTelemetry.status] || currentTelemetry.status;
+  elements.captureStatus.className = `telemetry-value telemetry-${quality}`;
+  elements.captureRate.textContent = formatRate(currentTelemetry.sampleRateHz);
+  elements.captureChannels.textContent = currentTelemetry.enabledChannels?.length
+    ? currentTelemetry.enabledChannels.map(channel => `D${channel}`).join(', ')
+    : '--';
+  elements.captureChannels.title = elements.captureChannels.textContent;
+  elements.captureThreshold.textContent = Number.isFinite(currentTelemetry.thresholdVolts)
+    ? `${currentTelemetry.thresholdVolts.toFixed(3)} V`
+    : '--';
+  elements.captureConverted.textContent = formatBytes(currentTelemetry.convertedBytes);
+  elements.captureConverted.title = [
+    Number.isFinite(currentTelemetry.crossChunks) ? `${currentTelemetry.crossChunks} chunks` : '',
+    Number.isFinite(currentTelemetry.windowCount) ? `${currentTelemetry.windowCount} windows` : '',
+    Number.isFinite(currentTelemetry.sampleCount) ? `${currentTelemetry.sampleCount} samples` : '',
+  ].filter(Boolean).join(' · ');
+  elements.captureInjected.textContent = formatBytes(currentTelemetry.injectedBytes);
+  elements.captureInjected.title = Number.isFinite(currentTelemetry.callbackCount)
+    ? `${currentTelemetry.callbackCount} callbacks`
+    : '';
+  elements.captureQueued.textContent = formatBytes(currentTelemetry.queuedBytes);
+  elements.captureLoss.textContent = droppedKnown || underflowsKnown
+    ? `${formatBytes(droppedBytes)} / ${underflows} 次`
+    : '待统计';
+  elements.captureLoss.className = `telemetry-value telemetry-${
+    droppedBytes > 0 ? 'error' : underflows > 0 ? 'warn' : droppedKnown && underflowsKnown ? 'ok' : 'muted'
+  }`;
+  elements.captureTrigger.textContent = currentTelemetry.triggerDescription === 'off'
+    ? '关闭'
+    : currentTelemetry.triggerDescription
+      ? `${currentTelemetry.triggerDescription}（GraphServer）`
+      : '--';
 }
 
 function renderState(state) {
@@ -566,6 +673,7 @@ elements.startButton.addEventListener('click', async () => {
 });
 
 api.onState(renderState);
+if (typeof api.onTelemetry === 'function') api.onTelemetry(renderTelemetry);
 api.onLog(appendLog);
 
 async function initialize() {
@@ -584,6 +692,7 @@ async function initialize() {
     : 'maximized';
   setPortMode(initial.settings.portMode);
   renderHardware(initial.hardware);
+  renderTelemetry(initial.captureTelemetry);
   if (initial.logs.length) {
     elements.logOutput.textContent = initial.logs.slice(-120).join('\n');
   }

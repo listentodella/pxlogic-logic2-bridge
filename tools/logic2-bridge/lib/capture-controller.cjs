@@ -171,7 +171,7 @@ function startPxlogicFeeder(options, host, captureSettings) {
   requirePath(options.bitstreams, 'PXLogic bitstream directory');
   requirePath(options.firmware, 'PXLogic MCU firmware');
 
-  const { enabledChannels, sampleRateHz } = captureSettings;
+  const { enabledChannels, sampleRateHz, thresholdVolts, triggerDescription } = captureSettings;
   const channelSpan = physicalChannelSpan(enabledChannels);
   host.stdin.write(createInjectionConfig(enabledChannels));
   // PXLogic always uses its recommended one-sample source-side filter.
@@ -196,6 +196,7 @@ function startPxlogicFeeder(options, host, captureSettings) {
   let printedProfile = false;
   let crossChunks = 0;
   let convertedBytes = 0;
+  let lastProgressEventAt = 0;
   let resolveDone;
   const done = new Promise(resolve => {
     resolveDone = resolve;
@@ -248,6 +249,14 @@ function startPxlogicFeeder(options, host, captureSettings) {
         `[logic2-bridge:pxlogic] started rate=${effectiveRate} span=` +
         `${metadata.channel_count || channelSpan} channels=${effectiveChannels.join(',')}`,
       );
+      emitBridgeEvent({
+        type: 'capture-started',
+        sampleRateHz: effectiveRate,
+        enabledChannels: effectiveChannels,
+        channelSpan: metadata.channel_count || channelSpan,
+        thresholdVolts,
+        triggerDescription,
+      });
       return;
     }
 
@@ -256,6 +265,16 @@ function startPxlogicFeeder(options, host, captureSettings) {
       if (index <= 2 || index % 64 === 0) {
         console.error(`[logic2-bridge:pxlogic] stream window=${index}`);
       }
+      return;
+    }
+    if (event.type === 'session') {
+      emitBridgeEvent({
+        type: 'capture-progress',
+        crossChunks,
+        convertedBytes,
+        windowCount: event.windowCount || 0,
+        sampleCount: event.sampleCount || 0,
+      });
       return;
     }
     if (event.type !== 'cross') return;
@@ -288,6 +307,11 @@ function startPxlogicFeeder(options, host, captureSettings) {
           `logic=${logicData.length} total=${convertedBytes}`,
         );
       }
+      const now = Date.now();
+      if (crossChunks === 1 || now - lastProgressEventAt >= 500) {
+        lastProgressEventAt = now;
+        emitBridgeEvent({ type: 'capture-progress', crossChunks, convertedBytes });
+      }
     } catch (error) {
       failure = { code: 'PXLOGIC_CONVERSION_FAILED', detail: error.message };
       console.error(`[logic2-bridge:pxlogic] conversion failed: ${error.message}`);
@@ -314,6 +338,13 @@ function startPxlogicFeeder(options, host, captureSettings) {
     if (!stopRequested && code !== 0 && !failure) {
       failure = { code: 'PXLOGIC_HELPER_EXITED', detail: `helper exited with code ${code}` };
     }
+    emitBridgeEvent({
+      type: 'capture-ended',
+      status: failure ? 'error' : 'stopped',
+      crossChunks,
+      convertedBytes,
+      failed: Boolean(failure),
+    });
     resolveDone({ code, failure });
   });
 
@@ -355,6 +386,7 @@ class PxlogicCaptureController {
         enabledChannels: [...this.options.enabledChannels],
         sampleRateHz: this.options.sampleRateHz,
         thresholdVolts: this.options.thresholdVolts,
+        triggerDescription: 'off',
         logicSoftwareGlitchFilterWidths: {},
       };
       this.sessions.set(key, settings);
@@ -398,8 +430,9 @@ class PxlogicCaptureController {
         `pxlogic-threshold=${threshold}`,
       );
     } else if (action.type === 'Saleae::Graph::DigitalTriggerSettingsData') {
+      settings.triggerDescription = describeDigitalTrigger(action);
       console.error(
-        `[logic2-bridge:control] Logic digital-trigger=${describeDigitalTrigger(action)} ` +
+        `[logic2-bridge:control] Logic digital-trigger=${settings.triggerDescription} ` +
         '(GraphServer only)',
       );
     } else if (action.type === 'Saleae::Graph::LogicDevice::StartCapture') {
@@ -435,6 +468,7 @@ class PxlogicCaptureController {
       enabledChannels: [...settings.enabledChannels],
       sampleRateHz: settings.sampleRateHz,
       thresholdVolts: this.options.hardwareThresholdVolts ?? settings.thresholdVolts,
+      triggerDescription: settings.triggerDescription,
     };
     console.error(
       `[logic2-bridge:control] StartCapture session=${sessionId ?? 'default'} ` +
@@ -443,6 +477,13 @@ class PxlogicCaptureController {
       `pxlogic-threshold=${captureSettings.thresholdVolts} V ` +
       'pxlogic-hardware-glitch-filter=1T pxlogic-hardware-trigger=off',
     );
+    emitBridgeEvent({
+      type: 'capture-starting',
+      sampleRateHz: captureSettings.sampleRateHz,
+      enabledChannels: captureSettings.enabledChannels,
+      thresholdVolts: captureSettings.thresholdVolts,
+      triggerDescription: captureSettings.triggerDescription,
+    });
     const feeder = startPxlogicFeeder(this.options, this.host, captureSettings);
     this.activeFeeder = feeder;
     this.activeSessionId = sessionId;
@@ -505,6 +546,7 @@ module.exports = {
   buildPxlogicPrepareArguments,
   createLineReader,
   describeDigitalTrigger,
+  emitBridgeEvent,
   extractLogicRequests,
   parseThresholdVolts,
   physicalChannelSpan,

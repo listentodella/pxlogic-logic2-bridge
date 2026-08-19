@@ -8,6 +8,7 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const {
   PxlogicCaptureController,
+  bridgeEventLine,
   createLineReader,
   preparePxlogicDevice,
 } = require('./lib/capture-controller.cjs');
@@ -22,6 +23,23 @@ const { startWebSocketProxy } = require('./lib/websocket-proxy.cjs');
 
 const bridgeRoot = __dirname;
 const pxlogicRoot = path.resolve(bridgeRoot, '..', '..');
+
+function parseInjectionStats(line) {
+  const match = String(line).match(
+    /^\[logic2-bridge:inject\] callback=(\d+) buffer=(\d+) injected=(\d+) queued=(\d+) total=(\d+) underflows=(\d+) dropped=(\d+)$/,
+  );
+  if (!match) return null;
+  return {
+    type: 'injection-progress',
+    callbackCount: Number(match[1]),
+    callbackBufferBytes: Number(match[2]),
+    callbackInjectedBytes: Number(match[3]),
+    queuedBytes: Number(match[4]),
+    injectedBytes: Number(match[5]),
+    underflows: Number(match[6]),
+    droppedBytes: Number(match[7]),
+  };
+}
 
 function parseArguments(argv) {
   const result = {
@@ -620,8 +638,13 @@ async function main() {
     // searches for its bundled runtime files.
     cwd: process.platform === 'win32' ? runtime.appPath : stateRoot,
     env: process.env,
-    stdio: ['pipe', 'pipe', 'inherit'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: process.platform === 'win32',
+  });
+  createLineReader(host.stderr, line => {
+    console.error(line);
+    const stats = parseInjectionStats(line);
+    if (stats) console.error(bridgeEventLine(stats));
   });
   if (process.platform === 'win32') {
     console.log('[logic2-bridge] Windows GraphServer will select its backend port');
@@ -712,6 +735,7 @@ module.exports = {
   nativeGraphStartupTimeoutMs,
   nativeHookArguments,
   parseArguments,
+  parseInjectionStats,
   readAppVersion,
   resolveAppPath,
   resolveRuntime,
