@@ -19,6 +19,7 @@ const {
   readLogicVersionFromInstallation,
 } = require('./lib/compatibility.cjs');
 const { normalizeEnabledChannels } = require('./lib/logic-format.cjs');
+const { GraphActionGuard } = require('./lib/graph-action-guard.cjs');
 const { startWebSocketProxy } = require('./lib/websocket-proxy.cjs');
 
 const bridgeRoot = __dirname;
@@ -684,10 +685,15 @@ async function main() {
       startupTimeoutMs,
     );
     controller = new PxlogicCaptureController(options, host);
+    const graphActionGuard = new GraphActionGuard();
     proxy = await startWebSocketProxy({
       port: options.port,
       backendPort: actualBackendPort,
-      observeText: message => controller.observeRequest(message),
+      observeText: async message => {
+        const transformed = graphActionGuard.transform(message);
+        await controller.observeRequest(message);
+        return transformed;
+      },
     });
     if (options.port !== 0 && proxy.port !== options.port) {
       console.log(

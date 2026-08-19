@@ -6,6 +6,8 @@ const { EventEmitter } = require('node:events');
 const net = require('node:net');
 const {
   ClientFrameRelay,
+  decodeMaskedPayload,
+  encodeMaskedTextFrame,
   removeCompressionOffer,
   startWebSocketProxy,
 } = require('../lib/websocket-proxy.cjs');
@@ -24,16 +26,24 @@ class FakeSocket extends EventEmitter {
 }
 
 function maskedTextFrame(text) {
-  const payload = Buffer.from(text);
-  const mask = Buffer.from([0x11, 0x22, 0x33, 0x44]);
-  const frame = Buffer.alloc(2 + 4 + payload.length);
-  frame[0] = 0x81;
-  frame[1] = 0x80 | payload.length;
-  mask.copy(frame, 2);
-  for (let index = 0; index < payload.length; index += 1) {
-    frame[6 + index] = payload[index] ^ mask[index % 4];
-  }
+  return encodeMaskedTextFrame(text);
+}
+
+function maskedFrame(text, { fin, opcode }) {
+  const frame = encodeMaskedTextFrame(text);
+  frame[0] = (fin ? 0x80 : 0) | opcode;
   return frame;
+}
+
+function decodeTextFrame(frame) {
+  const lengthCode = frame[1] & 0x7f;
+  const maskOffset = lengthCode === 126 ? 4 : lengthCode === 127 ? 10 : 2;
+  const payloadLength = lengthCode === 126
+    ? frame.readUInt16BE(2)
+    : lengthCode === 127
+      ? Number(frame.readBigUInt64BE(2))
+      : lengthCode;
+  return decodeMaskedPayload(frame, maskOffset + 4, payloadLength, maskOffset).toString('utf8');
 }
 
 test('removes compression offer so observed control frames remain JSON text', () => {
@@ -54,6 +64,39 @@ test('observes a Logic request before forwarding its frame', async () => {
   await relay.finish();
   assert.equal(observed, true);
   assert.deepEqual(upstream.frames, [frame]);
+});
+
+test('rewrites a Logic JSON request as a valid masked text frame', async () => {
+  const upstream = new FakeSocket();
+  const replacement = JSON.stringify({ type: 'request', contents: { actions: [] } });
+  const relay = new ClientFrameRelay(upstream, async () => replacement);
+  relay.push(maskedTextFrame(JSON.stringify({ type: 'request', contents: {
+    actions: [{ type: 'Saleae::Graph::GraphActions::RemoveNode', id: 10010 }],
+  } })));
+  await relay.finish();
+  assert.equal(upstream.frames.length, 1);
+  assert.equal((upstream.frames[0][1] & 0x80) !== 0, true);
+  assert.equal(decodeTextFrame(upstream.frames[0]), replacement);
+});
+
+test('reassembles fragmented text before applying a request transform', async () => {
+  const upstream = new FakeSocket();
+  const relay = new ClientFrameRelay(upstream, async text => text.replace('RemoveNode', 'Deferred'));
+  relay.push(maskedFrame('{"type":"Remove', { fin: false, opcode: 1 }));
+  relay.push(maskedFrame('Node"}', { fin: true, opcode: 0 }));
+  await relay.finish();
+  assert.equal(upstream.frames.length, 1);
+  assert.equal(decodeTextFrame(upstream.frames[0]), '{"type":"Deferred"}');
+});
+
+test('encodes transformed text larger than 64 KiB with a 64-bit payload length', async () => {
+  const upstream = new FakeSocket();
+  const replacement = 'x'.repeat(70_000);
+  const relay = new ClientFrameRelay(upstream, async () => replacement);
+  relay.push(maskedTextFrame('{"type":"request"}'));
+  await relay.finish();
+  assert.equal(upstream.frames[0][1] & 0x7f, 127);
+  assert.equal(decodeTextFrame(upstream.frames[0]), replacement);
 });
 
 test('allocates a public port automatically', async () => {
