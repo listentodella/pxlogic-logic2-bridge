@@ -1510,6 +1510,86 @@ fn inspect_logic_path(
     }
 }
 
+fn is_logic_bundle(path: &Path) -> bool {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !path.is_dir() {
+            return false;
+        }
+        let plist_path = path.join("Contents/Info.plist");
+        let Ok(plist) = plist::Value::from_file(plist_path) else {
+            return false;
+        };
+        plist
+            .as_dictionary()
+            .and_then(|dictionary| dictionary.get("CFBundleIdentifier"))
+            .and_then(plist::Value::as_string)
+            .is_some_and(|identifier| identifier == "com.saleae.saleae")
+    }
+}
+
+fn logic_app_candidates_from_path(path: &Path) -> Vec<PathBuf> {
+    if is_logic_bundle(path) {
+        return vec![path.to_path_buf()];
+    }
+    if !path.is_dir() {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut candidates = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|child| {
+            child.is_dir()
+                && child
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+                && is_logic_bundle(child)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates
+}
+
+fn paths_for_logic_scan(path: &Path) -> Vec<PathBuf> {
+    let candidates = logic_app_candidates_from_path(path);
+    if candidates.is_empty() {
+        vec![path.to_path_buf()]
+    } else {
+        candidates
+    }
+}
+
+fn inspect_logic_selection(
+    app: Option<&AppHandle>,
+    selected_path: &Path,
+    force_offline_analysis: bool,
+) -> LogicInspection {
+    let mut inspections = paths_for_logic_scan(selected_path)
+        .into_iter()
+        .map(|path| inspect_logic_path(app, &path, force_offline_analysis))
+        .collect::<Vec<_>>();
+    inspections.sort_by_key(|inspection| {
+        (
+            !inspection.runnable,
+            !inspection.supported,
+            inspection.path.clone(),
+        )
+    });
+    inspections
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| inspect_logic_path(app, selected_path, force_offline_analysis))
+}
+
 #[cfg(target_os = "macos")]
 fn installed_logic_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
@@ -1589,11 +1669,13 @@ fn scan_logic_paths(app: &AppHandle, saved_path: Option<&str>) -> Vec<LogicInspe
     let mut seen = HashSet::new();
     let mut applications = Vec::new();
     for candidate in candidates {
-        let key = candidate.to_string_lossy().into_owned();
-        if !seen.insert(key) || !candidate.exists() {
-            continue;
+        for candidate in paths_for_logic_scan(&candidate) {
+            let key = candidate.to_string_lossy().into_owned();
+            if !seen.insert(key) || !candidate.exists() {
+                continue;
+            }
+            applications.push(inspect_logic_path(Some(app), &candidate, false));
         }
-        applications.push(inspect_logic_path(Some(app), &candidate, false));
     }
     applications.sort_by_key(|inspection| !inspection.runnable);
     applications
@@ -2278,7 +2360,7 @@ async fn logic_scan(app: AppHandle, saved_path: String) -> Result<Vec<LogicInspe
 #[tauri::command]
 async fn logic_inspect(app: AppHandle, app_path: String) -> Result<LogicInspection, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        inspect_logic_path(Some(&app), Path::new(app_path.trim()), false)
+        inspect_logic_selection(Some(&app), Path::new(app_path.trim()), false)
     })
     .await
     .map_err(|error| format!("Logic 检查任务失败: {error}"))
@@ -2287,7 +2369,7 @@ async fn logic_inspect(app: AppHandle, app_path: String) -> Result<LogicInspecti
 #[tauri::command]
 async fn logic_analyze(app: AppHandle, app_path: String) -> Result<LogicInspection, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        inspect_logic_path(Some(&app), Path::new(app_path.trim()), true)
+        inspect_logic_selection(Some(&app), Path::new(app_path.trim()), true)
     })
     .await
     .map_err(|error| format!("Logic 兼容性分析任务失败: {error}"))
@@ -2322,7 +2404,7 @@ async fn logic_browse(app: AppHandle) -> Result<Option<LogicInspection>, String>
         dialog_app
             .dialog()
             .file()
-            .set_title("选择 Saleae Logic 2")
+            .set_title("选择 Saleae Logic 2 或其所在文件夹")
             .blocking_pick_folder()
     })
     .await
@@ -2333,7 +2415,7 @@ async fn logic_browse(app: AppHandle) -> Result<Option<LogicInspection>, String>
     let path = path
         .into_path()
         .map_err(|error| format!("选择的路径无效: {error}"))?;
-    Ok(Some(inspect_logic_path(Some(&app), &path, false)))
+    Ok(Some(inspect_logic_selection(Some(&app), &path, false)))
 }
 
 #[tauri::command]
@@ -2388,14 +2470,16 @@ async fn bridge_start(app: AppHandle, settings: ClientSettings) -> Result<Bridge
 
 fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<BridgeState, String> {
     let mut settings = store_settings(app, settings)?;
-    let selected_app_path = PathBuf::from(&settings.logic_app_path);
-    let app_path = resolve_logic_installation(&selected_app_path)?;
-    let inspection = inspect_logic_path(Some(app), &selected_app_path, false);
+    let inspection = inspect_logic_selection(Some(app), Path::new(&settings.logic_app_path), false);
     if !inspection.runnable {
         return Err(inspection
             .error
             .unwrap_or_else(|| "Logic 2 安装无效".to_string()));
     }
+    settings.logic_app_path = inspection.path.clone();
+    settings = store_settings(app, settings)?;
+    let selected_app_path = PathBuf::from(&settings.logic_app_path);
+    let app_path = resolve_logic_installation(&selected_app_path)?;
     let hardware = scan_pxlogic_hardware(app, &settings.pxlogic_device_id);
     if let Some(error) = hardware.error {
         return Err(error);
@@ -2658,7 +2742,7 @@ fn recent_graph_host_crash_reports() -> Vec<CrashReportSnapshot> {
 
 fn diagnostics_report(app: &AppHandle) -> Result<DiagnosticsReport, String> {
     let settings = load_settings(app);
-    let logic = inspect_logic_path(Some(app), Path::new(&settings.logic_app_path), false);
+    let logic = inspect_logic_selection(Some(app), Path::new(&settings.logic_app_path), false);
     let bridge_state = app
         .state::<AppState>()
         .bridge_state
@@ -2899,6 +2983,43 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn discovers_logic_bundle_when_parent_directory_is_selected() {
+        let root = std::env::temp_dir().join(format!(
+            "pxlogic-logic-bundle-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let logic = root.join("Saleae Logic.app");
+        let other = root.join("Other.app");
+        fs::create_dir_all(logic.join("Contents")).unwrap();
+        fs::create_dir_all(other.join("Contents")).unwrap();
+        fs::write(
+            logic.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.saleae.saleae</string></dict></plist>"#,
+        )
+        .unwrap();
+        fs::write(
+            other.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.other</string></dict></plist>"#,
+        )
+        .unwrap();
+
+        let candidates = logic_app_candidates_from_path(&root);
+        assert_eq!(candidates, vec![logic.clone()]);
+        assert!(is_logic_bundle(&logic));
+        assert!(!is_logic_bundle(&other));
+        assert_eq!(paths_for_logic_scan(&logic), vec![logic]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn normalizes_client_settings() {

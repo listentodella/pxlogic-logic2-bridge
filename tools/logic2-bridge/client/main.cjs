@@ -194,7 +194,7 @@ function saveSettings(value) {
   return settings;
 }
 
-function inspectLogicApp(appPath) {
+function inspectLogicBundle(appPath) {
   if (!appPath) {
     return {
       path: '', version: null, supported: false, runnable: false, error: '未选择 Logic 2',
@@ -212,17 +212,34 @@ function inspectLogicApp(appPath) {
   }
 }
 
+function inspectLogicApp(appPath) {
+  if (!appPath) return inspectLogicBundle(appPath);
+  const api = bridgeApi();
+  const candidates = api.logicAppCandidatesFromPath(appPath);
+  const inspections = (candidates.length ? candidates : [path.resolve(appPath)])
+    .map(candidate => inspectLogicBundle(candidate));
+  inspections.sort((left, right) => (
+    Number(right.runnable) - Number(left.runnable)
+      || Number(right.supported) - Number(left.supported)
+      || left.path.localeCompare(right.path)
+  ));
+  return inspections[0];
+}
+
 function discoverLogicApps(savedPath = '') {
-  const candidates = bridgeApi().installedAppCandidates();
+  const api = bridgeApi();
+  const candidates = api.installedAppCandidates();
   if (savedPath) candidates.unshift(savedPath);
   const seen = new Set();
   const applications = [];
   for (const candidate of candidates) {
-    const normalized = path.resolve(candidate);
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
-    if (!fs.existsSync(path.join(normalized, 'Contents', 'Info.plist'))) continue;
-    applications.push(inspectLogicApp(normalized));
+    const selected = api.logicAppCandidatesFromPath(candidate);
+    for (const normalized of (selected.length ? selected : [path.resolve(candidate)])) {
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      if (!api.isLogicAppBundle(normalized)) continue;
+      applications.push(inspectLogicBundle(normalized));
+    }
   }
   applications.sort((left, right) => Number(right.supported) - Number(left.supported));
   return applications;
@@ -370,6 +387,8 @@ function startBridge(rawSettings) {
   const settings = saveSettings(rawSettings);
   const logic = inspectLogicApp(settings.logicAppPath);
   if (!logic.supported) throw new Error(logic.error || 'Logic 2 安装无效');
+  settings.logicAppPath = logic.path;
+  saveSettings(settings);
   const hardware = scanHardware(settings.pxlogicDeviceId);
   if (hardware.error) throw new Error(hardware.error);
   const selectedDevice = hardware.devices.find(device => device.id === hardware.selectedDeviceId);
@@ -601,10 +620,10 @@ ipcMain.handle('logic:inspect', (_event, appPath) => inspectLogicApp(appPath));
 ipcMain.handle('pxlogic:scan', (_event, preferredDeviceId) => scanHardware(preferredDeviceId));
 ipcMain.handle('logic:browse', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: '选择 Saleae Logic 2',
+    title: '选择 Saleae Logic 2 或其所在文件夹',
     buttonLabel: '选择',
-    properties: ['openFile'],
-    filters: [{ name: 'macOS 应用', extensions: ['app'] }],
+    properties: ['openFile', 'openDirectory'],
+    filters: [{ name: 'macOS 应用或文件夹', extensions: ['app'] }],
   });
   if (result.canceled || !result.filePaths[0]) return null;
   return inspectLogicApp(result.filePaths[0]);

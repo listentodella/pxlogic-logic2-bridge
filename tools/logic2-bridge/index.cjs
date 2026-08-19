@@ -291,8 +291,53 @@ function installedAppCandidates() {
   return [...new Set(candidates)];
 }
 
+function readMacBundleIdentifier(appPath) {
+  if (process.platform !== 'darwin') return null;
+  const plist = path.join(appPath, 'Contents', 'Info.plist');
+  const result = spawnSync(
+    '/usr/libexec/PlistBuddy',
+    ['-c', 'Print :CFBundleIdentifier', plist],
+    { encoding: 'utf8' },
+  );
+  if (result.status !== 0) return null;
+  const identifier = result.stdout.trim();
+  return identifier || null;
+}
+
+function isLogicAppBundle(appPath) {
+  try {
+    if (!fs.statSync(appPath).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+  if (process.platform === 'darwin') {
+    return readMacBundleIdentifier(appPath) === 'com.saleae.saleae';
+  }
+  return fs.existsSync(path.join(appPath, 'Contents', 'Info.plist'));
+}
+
+function logicAppCandidatesFromPath(selectedPath) {
+  const normalized = path.resolve(selectedPath);
+  if (isLogicAppBundle(normalized)) return [normalized];
+  if (process.platform !== 'darwin') return [];
+  let entries;
+  try {
+    entries = fs.readdirSync(normalized, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter(entry => entry.isDirectory() && entry.name.toLowerCase().endsWith('.app'))
+    .map(entry => path.join(normalized, entry.name))
+    .filter(isLogicAppBundle)
+    .sort();
+}
+
 function resolveAppPath(explicitPath) {
-  if (explicitPath) return path.resolve(explicitPath);
+  if (explicitPath) {
+    const selected = logicAppCandidatesFromPath(explicitPath);
+    return selected[0] || path.resolve(explicitPath);
+  }
   const found = installedAppCandidates().find(candidate =>
     fs.existsSync(path.join(candidate, 'Contents', 'Info.plist')),
   );
@@ -746,6 +791,8 @@ async function main() {
 
 module.exports = {
   installedAppCandidates,
+  isLogicAppBundle,
+  logicAppCandidatesFromPath,
   loadRuntimeCompatibilityProfiles,
   logicProcessEnvironment,
   macMaximizeScript,
