@@ -138,28 +138,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let device_id = match &options.device_id {
-        Some(device_id) => device_id,
-        None => {
-            &devices
-                .iter()
-                .find(|device| device.ready)
-                .unwrap_or(&devices[0])
-                .id
-        }
-    };
+    let selected = select_device(&devices, options.device_id.as_deref())
+        .map_err(|error| -> Box<dyn Error> { error.into() })?;
+    let device_id = &selected.id;
     println!("selected: {device_id}");
-    if let Some(selected) = devices.iter().find(|device| device.id == *device_id) {
-        if !selected.ready {
-            return Err(format!(
-                "selected device is not ready: {}",
-                selected
-                    .probe_error
-                    .as_deref()
-                    .unwrap_or("PX identity probe did not complete")
-            )
-            .into());
-        }
+    if !selected.ready {
+        return Err(format!(
+            "selected device is not ready: {}",
+            selected
+                .probe_error
+                .as_deref()
+                .unwrap_or("PX identity probe did not complete")
+        )
+        .into());
     }
 
     let mut trace = |event: DiagnosticEvent| {
@@ -526,6 +517,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn select_device<'a>(
+    devices: &'a [DeviceInfo],
+    requested_id: Option<&str>,
+) -> Result<&'a DeviceInfo, String> {
+    if let Some(requested_id) = requested_id {
+        return devices
+            .iter()
+            .find(|device| device.id == requested_id)
+            .ok_or_else(|| {
+                format!("selected device is no longer available: {requested_id}; rescan required")
+            });
+    }
+    devices
+        .iter()
+        .find(|device| device.ready)
+        .or_else(|| devices.first())
+        .ok_or_else(|| "no PXLogic USB devices found".to_string())
 }
 
 fn parse_options() -> Result<Options, Box<dyn Error>> {
@@ -1159,4 +1169,50 @@ fn push_candidate(
         map,
         reverse_bits,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pxlogic_core::DeviceKind;
+
+    fn device(id: &str, ready: bool) -> DeviceInfo {
+        DeviceInfo {
+            id: id.to_string(),
+            kind: DeviceKind::Usb,
+            vid: 0x16c0,
+            pid: 0x05dc,
+            bus: Some(3),
+            address: Some(10),
+            label: "PXLogic".to_string(),
+            ready,
+            manufacturer: None,
+            product: None,
+            serial_number: None,
+            usb_speed: Some("super".to_string()),
+            logic_mode: None,
+            profile_model: None,
+            probe_error: None,
+        }
+    }
+
+    #[test]
+    fn requested_device_must_still_exist() {
+        let devices = vec![device("usb:16c0:05dc:3:10", true)];
+        let error = select_device(&devices, Some("usb:16c0:05dc:3:8")).unwrap_err();
+        assert!(error.contains("no longer available"));
+        assert!(error.contains("rescan required"));
+    }
+
+    #[test]
+    fn unspecified_device_prefers_a_ready_device() {
+        let devices = vec![
+            device("usb:16c0:05dc:3:8", false),
+            device("usb:16c0:05dc:3:10", true),
+        ];
+        assert_eq!(
+            select_device(&devices, None).unwrap().id,
+            "usb:16c0:05dc:3:10"
+        );
+    }
 }

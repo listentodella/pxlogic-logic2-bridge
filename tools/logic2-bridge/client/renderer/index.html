@@ -46,6 +46,7 @@
           <strong id="graph-fingerprint">--</strong>
           <span id="logic-compatibility" class="compatibility">未检测</span>
         </div>
+        <p id="compatibility-detail" class="compatibility-detail">等待检查正式支持状态</p>
       </section>
 
       <section class="settings-section hardware-section">
@@ -67,6 +68,25 @@
             <input id="pxlogic-threshold" type="number" min="0" max="6.668" step="0.01"
               inputmode="decimal" value="1.80">
           </div>
+          <div>
+            <label for="threshold-reference">参考起点</label>
+            <select id="threshold-reference">
+              <option value="custom">自定义</option>
+              <option value="logic-1.8" data-volts="0.9">1.8 V 电平中点 · 0.9 V</option>
+              <option value="logic-2.5" data-volts="1.25">2.5 V 电平中点 · 1.25 V</option>
+              <option value="logic-3.3" data-volts="1.65">3.3 V 电平中点 · 1.65 V</option>
+              <option value="logic-5.0" data-volts="2.5">5.0 V 电平中点 · 2.5 V</option>
+              <option value="fixture-stm32-spi" data-volts="2.2">STM32 SPI 已验证夹具 · 2.2 V</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="threshold-assistance">
+          <label class="threshold-verification" for="threshold-verified">
+            <input id="threshold-verified" type="checkbox">
+            <span>已用已知协议结果验证当前阈值</span>
+          </label>
+          <p id="threshold-guidance">检测到边沿不代表数据正确，当前阈值尚未验证</p>
         </div>
 
         <div class="hardware-status-row">
@@ -75,6 +95,37 @@
           <div><span>固件</span><strong id="pxlogic-firmware">--</strong></div>
           <div><span>FPGA</span><strong id="pxlogic-bitstream">--</strong></div>
           <div><span>硬件阈值</span><strong id="pxlogic-threshold-value">1.800 V</strong></div>
+        </div>
+      </section>
+
+      <section class="settings-section readiness-section">
+        <div class="section-heading compact-heading">
+          <div>
+            <h2>启动检查</h2>
+            <p id="readiness-summary">正在检查 Logic 2 与 PXLogic...</p>
+          </div>
+        </div>
+
+        <div class="readiness-grid" aria-live="polite">
+          <div>
+            <span>Logic 2 支持级别</span>
+            <strong id="logic-readiness" class="readiness-value">待检测</strong>
+          </div>
+          <div>
+            <span>PXLogic 设备</span>
+            <strong id="hardware-readiness" class="readiness-value">待检测</strong>
+          </div>
+          <div>
+            <span>硬件阈值</span>
+            <strong id="threshold-readiness" class="readiness-value">待检查</strong>
+          </div>
+        </div>
+        <div id="session-source" class="session-source">
+          <span>Logic 2 会话设备</span>
+          <strong>Demo Logic Pro 16</strong>
+          <span class="source-separator" aria-hidden="true"></span>
+          <span>实际数据源</span>
+          <strong id="session-source-device">PXLogic</strong>
         </div>
       </section>
 
@@ -111,13 +162,43 @@
         </div>
       </section>
 
+      <section class="settings-section capture-quality-section">
+        <div class="section-heading compact-heading">
+          <div>
+            <h2>采集质量</h2>
+            <p id="capture-summary">等待 Logic 2 开始采集</p>
+          </div>
+        </div>
+        <div class="telemetry-grid" aria-live="polite">
+          <div><span>状态</span><strong id="capture-status">未采集</strong></div>
+          <div><span>实际采样率</span><strong id="capture-rate">--</strong></div>
+          <div><span>启用通道</span><strong id="capture-channels">--</strong></div>
+          <div><span>比较阈值</span><strong id="capture-threshold">--</strong></div>
+          <div><span>已转换</span><strong id="capture-converted">--</strong></div>
+          <div><span>已注入</span><strong id="capture-injected">--</strong></div>
+          <div><span>注入队列</span><strong id="capture-queued">--</strong></div>
+          <div><span>丢弃 / 下溢</span><strong id="capture-loss">待统计</strong></div>
+        </div>
+        <p class="telemetry-detail">Logic 2 触发设置：<strong id="capture-trigger">--</strong></p>
+      </section>
+
       <section class="activity-section">
         <div class="activity-heading">
           <div>
             <h2>运行记录</h2>
             <p id="endpoint-label">WebSocket --</p>
           </div>
-          <button id="open-logs-button" class="quiet-button" type="button">打开日志目录</button>
+          <div class="activity-actions">
+            <button id="export-diagnostics-button" class="quiet-button" type="button">导出诊断</button>
+            <button id="open-logs-button" class="quiet-button" type="button">打开日志目录</button>
+          </div>
+        </div>
+        <div id="recovery-panel" class="recovery-panel" role="alert" hidden>
+          <div>
+            <strong id="recovery-title">Bridge 需要处理</strong>
+            <span id="recovery-message"></span>
+          </div>
+          <code id="recovery-code"></code>
         </div>
         <pre id="log-output" aria-live="polite">PXLogic Bridge 已就绪</pre>
       </section>
@@ -134,6 +215,19 @@
       <div class="dialog-actions">
         <button id="open-manual-button" class="secondary-button" type="button">打开手工指南</button>
         <button id="close-warning-button" class="primary-button" type="button">关闭</button>
+      </div>
+    </dialog>
+
+    <dialog id="experimental-confirmation" class="warning-dialog">
+      <h2>启动实验验证？</h2>
+      <p id="experimental-confirmation-message"></p>
+      <label class="confirmation-check" for="experimental-confirmation-checkbox">
+        <input id="experimental-confirmation-checkbox" type="checkbox">
+        <span>我确认当前不是关键采集任务，并接受实验性启动风险</span>
+      </label>
+      <div class="dialog-actions">
+        <button id="cancel-experimental-button" class="secondary-button" type="button">取消</button>
+        <button id="continue-experimental-button" class="primary-button" type="button" disabled>继续启动</button>
       </div>
     </dialog>
 

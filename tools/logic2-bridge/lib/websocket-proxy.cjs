@@ -1,5 +1,6 @@
 'use strict';
 
+const { randomBytes } = require('node:crypto');
 const net = require('node:net');
 
 const MAX_HANDSHAKE_BYTES = 64 * 1024;
@@ -34,6 +35,32 @@ function decodeMaskedPayload(frame, payloadOffset, payloadLength, maskOffset) {
   return output;
 }
 
+function encodeMaskedTextFrame(text) {
+  const payload = Buffer.from(text, 'utf8');
+  let headerLength = 2;
+  if (payload.length > 125 && payload.length <= 0xffff) headerLength += 2;
+  else if (payload.length > 0xffff) headerLength += 8;
+  const maskOffset = headerLength;
+  const payloadOffset = maskOffset + 4;
+  const frame = Buffer.allocUnsafe(payloadOffset + payload.length);
+  frame[0] = 0x81;
+  if (payload.length <= 125) {
+    frame[1] = 0x80 | payload.length;
+  } else if (payload.length <= 0xffff) {
+    frame[1] = 0x80 | 126;
+    frame.writeUInt16BE(payload.length, 2);
+  } else {
+    frame[1] = 0x80 | 127;
+    frame.writeBigUInt64BE(BigInt(payload.length), 2);
+  }
+  const mask = randomBytes(4);
+  mask.copy(frame, maskOffset);
+  for (let index = 0; index < payload.length; index += 1) {
+    frame[payloadOffset + index] = payload[index] ^ mask[index % 4];
+  }
+  return frame;
+}
+
 class ClientFrameRelay {
   constructor(upstream, observeText) {
     this.upstream = upstream;
@@ -41,6 +68,7 @@ class ClientFrameRelay {
     this.buffer = Buffer.alloc(0);
     this.forwarding = Promise.resolve();
     this.fragmentText = null;
+    this.fragmentTextFrames = null;
     this.fragmentTextBytes = 0;
   }
 
@@ -85,7 +113,7 @@ class ClientFrameRelay {
 
     const frame = Buffer.from(this.buffer.subarray(0, frameLength));
     this.buffer = this.buffer.subarray(frameLength);
-    const observedText = this.collectTextFrame(
+    const textMessage = this.collectTextFrame(
       opcode,
       fin,
       frame,
@@ -93,10 +121,21 @@ class ClientFrameRelay {
       payloadLength,
       maskOffset,
     );
-    this.forwarding = this.forwarding.then(async () => {
-      if (observedText !== undefined) await this.observeText(observedText);
-      await writeSocket(this.upstream, frame);
-    });
+    if (!textMessage.handled || textMessage.complete) {
+      const frames = textMessage.complete ? textMessage.frames : [frame];
+      this.forwarding = this.forwarding.then(async () => {
+        let forwardedFrames = frames;
+        if (textMessage.complete) {
+          const transformed = await this.observeText(textMessage.text);
+          if (typeof transformed === 'string' && transformed !== textMessage.text) {
+            forwardedFrames = [encodeMaskedTextFrame(transformed)];
+          }
+        }
+        for (const forwarded of forwardedFrames) {
+          await writeSocket(this.upstream, forwarded);
+        }
+      });
+    }
     // finish() retains the rejected promise for orderly shutdown; this handler
     // prevents an early unhandled-rejection report before the socket closes.
     this.forwarding.catch(() => {});
@@ -106,32 +145,42 @@ class ClientFrameRelay {
   collectTextFrame(opcode, fin, frame, payloadOffset, payloadLength, maskOffset) {
     if (opcode === 1) {
       const payload = decodeMaskedPayload(frame, payloadOffset, payloadLength, maskOffset);
-      if (fin) return payload.toString('utf8');
+      if (fin) {
+        return { handled: true, complete: true, text: payload.toString('utf8'), frames: [frame] };
+      }
       this.fragmentText = [payload];
+      this.fragmentTextFrames = [frame];
       this.fragmentTextBytes = payload.length;
-      return undefined;
+      return { handled: true, complete: false };
     }
-    if (opcode !== 0 || this.fragmentText === null) return undefined;
+    if (opcode !== 0 || this.fragmentText === null) {
+      return { handled: false, complete: false };
+    }
 
     const payload = decodeMaskedPayload(frame, payloadOffset, payloadLength, maskOffset);
     this.fragmentTextBytes += payload.length;
     if (this.fragmentTextBytes <= MAX_OBSERVED_TEXT_BYTES) {
       this.fragmentText.push(payload);
     } else {
-      this.fragmentText = [];
+      throw new Error('Logic WebSocket text message exceeded 32 MiB');
     }
-    if (!fin) return undefined;
+    this.fragmentTextFrames.push(frame);
+    if (!fin) return { handled: true, complete: false };
 
-    const complete = this.fragmentTextBytes <= MAX_OBSERVED_TEXT_BYTES
-      ? Buffer.concat(this.fragmentText, this.fragmentTextBytes).toString('utf8')
-      : undefined;
+    const complete = {
+      handled: true,
+      complete: true,
+      text: Buffer.concat(this.fragmentText, this.fragmentTextBytes).toString('utf8'),
+      frames: this.fragmentTextFrames,
+    };
     this.fragmentText = null;
+    this.fragmentTextFrames = null;
     this.fragmentTextBytes = 0;
     return complete;
   }
 
   async finish() {
-    if (this.buffer.length !== 0) {
+    if (this.buffer.length !== 0 || this.fragmentText !== null) {
       throw new Error('Logic connection ended with a partial WebSocket frame');
     }
     await this.forwarding;
@@ -262,6 +311,7 @@ function startWebSocketProxy({ port, backendPort, observeText }) {
 module.exports = {
   ClientFrameRelay,
   decodeMaskedPayload,
+  encodeMaskedTextFrame,
   removeCompressionOffer,
   startWebSocketProxy,
 };

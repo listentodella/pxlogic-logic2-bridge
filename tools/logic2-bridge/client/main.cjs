@@ -13,6 +13,10 @@ const {
   nativeImage,
   shell,
 } = require('electron');
+const {
+  classifyGraphServerFailure,
+  recentGraphHostCrashReports,
+} = require('../lib/diagnostics.cjs');
 
 const DEFAULT_SETTINGS = Object.freeze({
   logicAppPath: '',
@@ -22,14 +26,19 @@ const DEFAULT_SETTINGS = Object.freeze({
   maximizeLogicWindow: true,
   pxlogicDeviceId: '',
   pxlogicThresholdVolts: 1.8,
+  pxlogicThresholdProfiles: {},
 });
 const MAX_PXLOGIC_THRESHOLD_VOLTS = 6.668;
 
 let mainWindow;
 let tray;
 let bridgeProcess;
-let bridgeState = { phase: 'stopped', actualPort: null, message: '待机' };
+let bridgeState = {
+  phase: 'stopped', actualPort: null, message: '待机', errorCode: null, recoveryAction: null,
+};
+let captureTelemetry = defaultCaptureTelemetry();
 let logLines = [];
+let previousSessionLogLines = [];
 let quitting = false;
 
 function bridgeRoot() {
@@ -134,6 +143,19 @@ function normalizeSettings(value = {}) {
     : Number.isFinite(temporaryComparatorField)
       ? temporaryComparatorField
       : DEFAULT_SETTINGS.pxlogicThresholdVolts;
+  const pxlogicThresholdProfiles = {};
+  if (value.pxlogicThresholdProfiles && typeof value.pxlogicThresholdProfiles === 'object') {
+    for (const [deviceId, candidate] of Object.entries(value.pxlogicThresholdProfiles)) {
+      const volts = Number(candidate?.volts);
+      if (!deviceId.trim() || !Number.isFinite(volts) ||
+          volts < 0 || volts > MAX_PXLOGIC_THRESHOLD_VOLTS) continue;
+      pxlogicThresholdProfiles[deviceId] = {
+        volts,
+        verified: candidate.verified === true,
+        reference: typeof candidate.reference === 'string' ? candidate.reference.trim() : '',
+      };
+    }
+  }
   return {
     logicAppPath: typeof value.logicAppPath === 'string' ? value.logicAppPath.trim() : '',
     portMode,
@@ -151,6 +173,7 @@ function normalizeSettings(value = {}) {
       pxlogicThresholdVolts <= MAX_PXLOGIC_THRESHOLD_VOLTS
       ? pxlogicThresholdVolts
       : DEFAULT_SETTINGS.pxlogicThresholdVolts,
+    pxlogicThresholdProfiles,
   };
 }
 
@@ -171,7 +194,7 @@ function saveSettings(value) {
   return settings;
 }
 
-function inspectLogicApp(appPath) {
+function inspectLogicBundle(appPath) {
   if (!appPath) {
     return {
       path: '', version: null, supported: false, runnable: false, error: '未选择 Logic 2',
@@ -189,17 +212,34 @@ function inspectLogicApp(appPath) {
   }
 }
 
+function inspectLogicApp(appPath) {
+  if (!appPath) return inspectLogicBundle(appPath);
+  const api = bridgeApi();
+  const candidates = api.logicAppCandidatesFromPath(appPath);
+  const inspections = (candidates.length ? candidates : [path.resolve(appPath)])
+    .map(candidate => inspectLogicBundle(candidate));
+  inspections.sort((left, right) => (
+    Number(right.runnable) - Number(left.runnable)
+      || Number(right.supported) - Number(left.supported)
+      || left.path.localeCompare(right.path)
+  ));
+  return inspections[0];
+}
+
 function discoverLogicApps(savedPath = '') {
-  const candidates = bridgeApi().installedAppCandidates();
+  const api = bridgeApi();
+  const candidates = api.installedAppCandidates();
   if (savedPath) candidates.unshift(savedPath);
   const seen = new Set();
   const applications = [];
   for (const candidate of candidates) {
-    const normalized = path.resolve(candidate);
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
-    if (!fs.existsSync(path.join(normalized, 'Contents', 'Info.plist'))) continue;
-    applications.push(inspectLogicApp(normalized));
+    const selected = api.logicAppCandidatesFromPath(candidate);
+    for (const normalized of (selected.length ? selected : [path.resolve(candidate)])) {
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      if (!api.isLogicAppBundle(normalized)) continue;
+      applications.push(inspectLogicBundle(normalized));
+    }
   }
   applications.sort((left, right) => Number(right.supported) - Number(left.supported));
   return applications;
@@ -215,6 +255,89 @@ function setBridgeState(next) {
   refreshTrayMenu();
 }
 
+function parseBridgeRuntimeEvent(line) {
+  const prefix = '[logic2-bridge:event] ';
+  if (!line.startsWith(prefix)) return null;
+  try {
+    return JSON.parse(line.slice(prefix.length));
+  } catch {
+    return null;
+  }
+}
+
+function captureFailureMessage(code) {
+  const messages = {
+    PXLOGIC_RATE_MISMATCH: '实际采样率与 Logic 2 设置不一致',
+    PXLOGIC_CHANNEL_MISMATCH: '实际通道映射与 Logic 2 设置不一致',
+    PXLOGIC_CHANNEL_MAPPING_CHANGED: '实际通道映射与 Logic 2 设置不一致',
+    PXLOGIC_CONVERSION_FAILED: 'PXLogic 数据转换失败',
+    PXLOGIC_HELPER_START_FAILED: 'PXLogic 采集进程无法启动',
+    PXLOGIC_HELPER_EXITED: 'PXLogic 采集进程异常退出',
+    PXLOGIC_USB_REENUMERATED: '检测到 PXLogic 的 USB 地址发生变化，常见于电脑 USB 控制器、Hub 或设备重置。采集已安全停止，设备通常未损坏。请重新扫描并初始化 Bridge。',
+    GRAPH_ANALYZER_CLEANUP_CRASH: 'Logic 2 图形服务在采集中清理协议分析器时异常退出。PXLogic 设备通常未损坏；请重新初始化 Bridge，诊断信息已保留。',
+  };
+  return messages[code] || 'PXLogic 采集失败';
+}
+
+function defaultCaptureTelemetry() {
+  return {
+    status: 'idle',
+    sampleRateHz: null,
+    enabledChannels: [],
+    channelSpan: null,
+    thresholdVolts: null,
+    triggerDescription: null,
+    crossChunks: 0,
+    convertedBytes: 0,
+    windowCount: null,
+    sampleCount: null,
+    callbackCount: null,
+    queuedBytes: null,
+    injectedBytes: null,
+    underflows: null,
+    droppedBytes: null,
+  };
+}
+
+function applyCaptureRuntimeEvent(event) {
+  if (event.type === 'capture-starting') {
+    captureTelemetry = {
+      ...defaultCaptureTelemetry(),
+      status: 'starting',
+      sampleRateHz: event.sampleRateHz ?? null,
+      enabledChannels: event.enabledChannels || [],
+      thresholdVolts: event.thresholdVolts ?? null,
+      triggerDescription: event.triggerDescription ?? null,
+    };
+  } else if (event.type === 'capture-started') {
+    Object.assign(captureTelemetry, {
+      status: 'streaming',
+      sampleRateHz: event.sampleRateHz ?? captureTelemetry.sampleRateHz,
+      enabledChannels: event.enabledChannels || captureTelemetry.enabledChannels,
+      channelSpan: event.channelSpan ?? captureTelemetry.channelSpan,
+      thresholdVolts: event.thresholdVolts ?? captureTelemetry.thresholdVolts,
+      triggerDescription: event.triggerDescription ?? captureTelemetry.triggerDescription,
+    });
+  } else if (event.type === 'capture-progress') {
+    for (const key of ['crossChunks', 'convertedBytes', 'windowCount', 'sampleCount']) {
+      if (event[key] !== undefined) captureTelemetry[key] = event[key];
+    }
+  } else if (event.type === 'injection-progress') {
+    for (const key of ['callbackCount', 'queuedBytes', 'injectedBytes', 'underflows', 'droppedBytes']) {
+      if (event[key] !== undefined) captureTelemetry[key] = event[key];
+    }
+  } else if (event.type === 'capture-ended') {
+    captureTelemetry.status = event.status || (event.failed ? 'error' : 'stopped');
+    if (event.crossChunks !== undefined) captureTelemetry.crossChunks = event.crossChunks;
+    if (event.convertedBytes !== undefined) captureTelemetry.convertedBytes = event.convertedBytes;
+  } else if (event.type === 'capture-unavailable') {
+    captureTelemetry.status = 'error';
+  } else {
+    return;
+  }
+  emit('bridge:telemetry', { ...captureTelemetry });
+}
+
 function appendLog(source, chunk) {
   const lines = String(chunk).split(/\r?\n/).filter(Boolean);
   for (const line of lines) {
@@ -222,9 +345,39 @@ function appendLog(source, chunk) {
     logLines.push(entry);
     if (logLines.length > 500) logLines.shift();
     emit('bridge:log', entry);
+    const event = parseBridgeRuntimeEvent(line);
+    if (event) applyCaptureRuntimeEvent(event);
+    if (event?.type === 'capture-unavailable') {
+      setBridgeState({
+        phase: 'recovery',
+        message: captureFailureMessage(event.code),
+        errorCode: event.code,
+        recoveryAction: event.recoveryAction || 'restart-bridge',
+      });
+    }
+    if (event?.type === 'graphserver-failure') {
+      setBridgeState({
+        phase: 'recovery',
+        message: captureFailureMessage(event.code),
+        errorCode: event.code || 'GRAPH_ANALYZER_CLEANUP_CRASH',
+        recoveryAction: event.recoveryAction || 'restart-bridge',
+      });
+    }
+    const graphFailure = classifyGraphServerFailure(line);
+    if (graphFailure) {
+      setBridgeState({
+        phase: 'recovery',
+        message: graphFailure.message,
+        errorCode: graphFailure.code,
+        recoveryAction: graphFailure.recoveryAction,
+      });
+    }
     const match = line.match(/Graph WebSocket ready: ws:\/\/127\.0\.0\.1:(\d+)\/saleae/);
     if (match) {
-      setBridgeState({ phase: 'running', actualPort: Number(match[1]), message: '已连接' });
+      setBridgeState({
+        phase: 'running', actualPort: Number(match[1]), message: '已连接',
+        errorCode: null, recoveryAction: null,
+      });
     }
   }
 }
@@ -234,6 +387,8 @@ function startBridge(rawSettings) {
   const settings = saveSettings(rawSettings);
   const logic = inspectLogicApp(settings.logicAppPath);
   if (!logic.supported) throw new Error(logic.error || 'Logic 2 安装无效');
+  settings.logicAppPath = logic.path;
+  saveSettings(settings);
   const hardware = scanHardware(settings.pxlogicDeviceId);
   if (hardware.error) throw new Error(hardware.error);
   const selectedDevice = hardware.devices.find(device => device.id === hardware.selectedDeviceId);
@@ -253,7 +408,13 @@ function startBridge(rawSettings) {
   ];
   if (settings.maximizeLogicWindow) args.push('--maximize-window');
   else args.push('--screen-quadrant', String(settings.screenQuadrant));
-  setBridgeState({ phase: 'starting', actualPort: null, message: '正在启动' });
+  setBridgeState({
+    phase: 'starting', actualPort: null, message: '正在启动',
+    errorCode: null, recoveryAction: null,
+  });
+  captureTelemetry = defaultCaptureTelemetry();
+  emit('bridge:telemetry', { ...captureTelemetry });
+  if (logLines.length) previousSessionLogLines = [...logLines];
   logLines = [];
   bridgeProcess = spawn(process.execPath, args, {
     cwd: bridgeRoot(),
@@ -268,15 +429,38 @@ function startBridge(rawSettings) {
   bridgeProcess.once('error', error => {
     appendLog('error', error.message);
     bridgeProcess = undefined;
-    setBridgeState({ phase: 'error', actualPort: null, message: error.message });
+    setBridgeState({
+      phase: 'error', actualPort: null, message: error.message,
+      errorCode: 'BRIDGE_START_FAILED', recoveryAction: 'export-diagnostics',
+    });
   });
   bridgeProcess.once('exit', (code, signal) => {
     bridgeProcess = undefined;
+    const graphFailure = classifyGraphServerFailure(logLines);
+    const reportedGraphFailure = bridgeState.errorCode === 'GRAPH_ANALYZER_CLEANUP_CRASH'
+      ? {
+        code: 'GRAPH_ANALYZER_CLEANUP_CRASH',
+        message: captureFailureMessage('GRAPH_ANALYZER_CLEANUP_CRASH'),
+        recoveryAction: 'restart-bridge',
+      }
+      : null;
+    if ((graphFailure || reportedGraphFailure) && !quitting) {
+      const failure = graphFailure || reportedGraphFailure;
+      setBridgeState({
+        phase: 'recovery', actualPort: null,
+        message: failure.message,
+        errorCode: failure.code,
+        recoveryAction: failure.recoveryAction,
+      });
+      return;
+    }
     const failed = code !== 0 && !quitting;
     setBridgeState({
       phase: failed ? 'error' : 'stopped',
       actualPort: null,
       message: failed ? `Bridge 已退出（${signal || `代码 ${code}`}）` : '待机',
+      errorCode: failed ? 'BRIDGE_PROCESS_EXITED' : null,
+      recoveryAction: failed ? 'export-diagnostics' : null,
     });
   });
   return { ...bridgeState };
@@ -284,9 +468,70 @@ function startBridge(rawSettings) {
 
 function stopBridge() {
   if (!bridgeProcess) return { ...bridgeState };
-  setBridgeState({ phase: 'stopping', message: '正在停止' });
+  setBridgeState({
+    phase: 'stopping', message: '正在停止', errorCode: null, recoveryAction: null,
+  });
   bridgeProcess.kill('SIGTERM');
   return { ...bridgeState };
+}
+
+async function restartBridge(settings) {
+  if (bridgeProcess) {
+    const processToStop = bridgeProcess;
+    const stopped = new Promise((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error('等待 Bridge 停止超时，请先退出后再重新启动')),
+        6000,
+      );
+      processToStop.once('exit', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    stopBridge();
+    await stopped;
+  }
+  return startBridge(settings);
+}
+
+function readTextTail(filePath, maxBytes = 64 * 1024) {
+  try {
+    const contents = fs.readFileSync(filePath);
+    return contents.subarray(Math.max(0, contents.length - maxBytes)).toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+async function exportDiagnostics() {
+  const generatedAtUnixSeconds = Math.floor(Date.now() / 1000);
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: '导出 PXLogic Bridge 诊断',
+    defaultPath: `pxlogic-bridge-diagnostics-${generatedAtUnixSeconds}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  const settings = loadSettings();
+  const logDirectory = path.join(
+    app.getPath('home'), 'Library', 'Application Support', 'PXLogic', 'logic2-bridge',
+  );
+  const report = {
+    schemaVersion: 2,
+    generatedAtUnixSeconds,
+    clientVersion: app.getVersion(),
+    platform: process.platform,
+    architecture: process.arch,
+    settings,
+    logic: inspectLogicApp(settings.logicAppPath),
+    bridgeState,
+    captureTelemetry,
+    recentLogs: logLines,
+    previousSessionLogs: previousSessionLogLines,
+    graphLogTail: readTextTail(path.join(logDirectory, 'graphio.log')),
+    graphHostCrashReports: recentGraphHostCrashReports(app.getPath('home')),
+  };
+  fs.writeFileSync(result.filePath, `${JSON.stringify(report, null, 2)}\n`);
+  return result.filePath;
 }
 
 function showWindow() {
@@ -367,7 +612,7 @@ ipcMain.handle('client:initial-state', () => {
     settings.pxlogicDeviceId = hardware.selectedDeviceId;
     saveSettings(settings);
   }
-  return { settings, applications, hardware, bridgeState, logs: logLines };
+  return { settings, applications, hardware, bridgeState, captureTelemetry, logs: logLines };
 });
 ipcMain.handle('client:save-settings', (_event, settings) => saveSettings(settings));
 ipcMain.handle('logic:scan', (_event, savedPath) => discoverLogicApps(savedPath));
@@ -375,16 +620,18 @@ ipcMain.handle('logic:inspect', (_event, appPath) => inspectLogicApp(appPath));
 ipcMain.handle('pxlogic:scan', (_event, preferredDeviceId) => scanHardware(preferredDeviceId));
 ipcMain.handle('logic:browse', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: '选择 Saleae Logic 2',
+    title: '选择 Saleae Logic 2 或其所在文件夹',
     buttonLabel: '选择',
-    properties: ['openFile'],
-    filters: [{ name: 'macOS 应用', extensions: ['app'] }],
+    properties: ['openFile', 'openDirectory'],
+    filters: [{ name: 'macOS 应用或文件夹', extensions: ['app'] }],
   });
   if (result.canceled || !result.filePaths[0]) return null;
   return inspectLogicApp(result.filePaths[0]);
 });
 ipcMain.handle('bridge:start', (_event, settings) => startBridge(settings));
+ipcMain.handle('bridge:restart', (_event, settings) => restartBridge(settings));
 ipcMain.handle('bridge:stop', () => stopBridge());
+ipcMain.handle('diagnostics:export', () => exportDiagnostics());
 ipcMain.handle('logs:open', () => {
   const logDirectory = path.join(app.getPath('home'), 'Library', 'Application Support', 'PXLogic', 'logic2-bridge');
   fs.mkdirSync(logDirectory, { recursive: true });

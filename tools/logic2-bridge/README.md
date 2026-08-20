@@ -161,6 +161,20 @@ is independent from Logic 2's nominal I/O-level selector. Logic 2 remains
 authoritative for enabled channels, sample rate, capture control, triggers,
 software glitch filters, and analyzers.
 
+The launch checklist labels a matched GraphServer as `正式支持`, `实验验证`, or
+`不可用`; a runnable experimental profile is never presented as formally
+supported. It also keeps the session mapping visible: `Demo Logic Pro 16` is
+the Logic 2 compatibility device, while the selected PXLogic remains the real
+sample source.
+
+During a capture, the desktop client shows the helper's effective sample rate,
+enabled channels, comparator threshold, converted bytes, and the native host's
+injected/queued bytes, callback underflows, and dropped bytes. A clean quality
+status is shown only after native injection counters have been observed. The
+trigger field reports the Logic 2 GraphServer trigger configuration; it does
+not claim that a trigger fired because GraphServer does not expose that event
+to the Bridge.
+
 Click `Start Logic 2` after a verified profile is shown. For a locally analyzed
 candidate, review the automatic-candidate status and use `启动实验验证`; an
 unsupported result is not injected.
@@ -179,11 +193,12 @@ actual value to Logic 2. The port is not fixed by Logic. In fixed mode the
 selected value is preferred; if it is occupied, the bridge falls back to an
 available port and reports the actual endpoint in the client.
 
-CI builds are ad-hoc signed so the application bundle and packaged resources
-can be checked for integrity, but they are not Developer ID signed or notarized.
-macOS may require the first launch through Finder's `Open` context-menu action.
-Public distribution without that prompt requires Developer ID signing and
-Apple notarization.
+CI builds default to ad-hoc signing so the application bundle and packaged
+resources can be checked for integrity. A tag build can opt into Developer ID
+signing and Apple notarization by setting the repository variable
+`PXLOGIC_MACOS_SIGNING_MODE=notarized` and configuring the certificate and
+notary credentials documented in `../../docs/macos-distribution.md`. Ad-hoc builds
+may require the first launch through Finder's `Open` context-menu action.
 
 ## Command-line development
 
@@ -248,6 +263,13 @@ interrupt rises, the following four-byte SPI read contains the expected
 `0x43`. A `1.5 V` capture showed activity but decoded the transaction
 incorrectly, so edge counts alone are not an acceptable threshold test.
 
+The desktop client provides common logic-level midpoint values only as starting
+references, not correctness claims. It stores the chosen voltage, reference,
+and user-confirmed protocol-validation state separately for each PXLogic device.
+Changing the voltage or reference clears that validation state. The `2.2 V`
+STM32 SPI fixture option remains unverified for a different target until the
+user confirms known protocol contents and explicitly marks it as validated.
+
 The one-time FPGA prepare can still produce a hardware-front-end transient. If
 the target bus is affected when the Bridge itself starts, stop testing and
 verify probe grounding and input impedance with an oscilloscope. Repeated Logic
@@ -256,6 +278,31 @@ Start operations must not log `uploading reset bitstream` or
 startup.
 
 ## Diagnostics
+
+The desktop client's `导出诊断` action writes a local JSON report containing
+the selected settings, Logic fingerprint result, compatibility cache, current
+Bridge state, current and previous-session runtime logs, and the tail of
+`graphio.log`. On macOS, schema version 2 also includes snapshots of the three
+most recent `graph-host` crash reports. The report is created only at the path
+selected by the user and is never uploaded.
+
+Capture helper failures are classified with stable error codes. A rate,
+channel-mapping, conversion, helper-start, or helper-exit failure changes the
+client to a recovery-required state. `重新初始化 Bridge` first stops the current
+Bridge process, waits for it to exit, and only then starts a fresh process that
+performs the one-time FPGA prepare again. No automatic hardware reconfiguration
+is attempted after a capture failure.
+
+A confirmed USB address change is reported separately as
+`PXLOGIC_USB_REENUMERATED`, with guidance that a USB controller, hub, or device
+reset usually does not mean the hardware is damaged. The Logic 2 GraphServer
+analyzer-cleanup assertion is classified as `GRAPH_ANALYZER_CLEANUP_CRASH`
+rather than a generic PXLogic capture-process exit. While the Bridge is running,
+macOS `graphio.log` is monitored from the current session's starting offset;
+historical assertions and rotated-log contents are not replayed as new faults.
+When the assertion is appended, the desktop client immediately keeps the
+recovery panel red and preserves the restart/diagnostics action even if the
+GraphServer process subsequently exits cleanly.
 
 `--dry-run` validates the app version, GraphServer resources, PXLogic helper,
 firmware, bitstreams, and native host build without launching Logic:

@@ -9,16 +9,62 @@ const os = require('node:os');
 const path = require('node:path');
 const { PassThrough } = require('node:stream');
 const {
+  isLogicAppBundle,
+  logicAppCandidatesFromPath,
   logicProcessEnvironment,
   loadRuntimeCompatibilityProfiles,
   macMaximizeScript,
   nativeGraphStartupTimeoutMs,
   nativeHookArguments,
   parseArguments,
+  parseInjectionStats,
   resolveRuntimeVersion,
   waitForNativeGraph,
   windowsMaximizeScript,
 } = require('../index.cjs');
+
+test('discovers a Logic app inside a selected macOS Applications folder', t => {
+  if (process.platform !== 'darwin') return;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'logic2-app-picker-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const logic = path.join(directory, 'Saleae Logic.app');
+  const other = path.join(directory, 'Other.app');
+  fs.mkdirSync(path.join(logic, 'Contents'), { recursive: true });
+  fs.mkdirSync(path.join(other, 'Contents'), { recursive: true });
+  fs.writeFileSync(
+    path.join(logic, 'Contents', 'Info.plist'),
+    `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.saleae.saleae</string></dict></plist>`,
+  );
+  fs.writeFileSync(
+    path.join(other, 'Contents', 'Info.plist'),
+    '<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.other</string></dict></plist>',
+  );
+  assert.deepEqual(logicAppCandidatesFromPath(directory), [logic]);
+  assert.equal(isLogicAppBundle(logic), true);
+  assert.equal(isLogicAppBundle(other), false);
+});
+
+test('parses native injection quality counters', () => {
+  assert.deepEqual(
+    parseInjectionStats(
+      '[logic2-bridge:inject] callback=128 buffer=65536 injected=65536 ' +
+      'queued=131072 total=8388608 underflows=2 dropped=4096',
+    ),
+    {
+      type: 'injection-progress',
+      callbackCount: 128,
+      callbackBufferBytes: 65536,
+      callbackInjectedBytes: 65536,
+      queuedBytes: 131072,
+      injectedBytes: 8388608,
+      underflows: 2,
+      droppedBytes: 4096,
+    },
+  );
+  assert.equal(parseInjectionStats('unrelated output'), null);
+});
 
 test('uses an automatically allocated public port by default', () => {
   assert.equal(parseArguments([]).port, 0);

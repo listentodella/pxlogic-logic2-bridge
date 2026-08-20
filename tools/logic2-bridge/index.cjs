@@ -8,6 +8,7 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const {
   PxlogicCaptureController,
+  bridgeEventLine,
   createLineReader,
   preparePxlogicDevice,
 } = require('./lib/capture-controller.cjs');
@@ -18,10 +19,29 @@ const {
   readLogicVersionFromInstallation,
 } = require('./lib/compatibility.cjs');
 const { normalizeEnabledChannels } = require('./lib/logic-format.cjs');
+const { GraphActionGuard } = require('./lib/graph-action-guard.cjs');
+const { GraphLogMonitor } = require('./lib/diagnostics.cjs');
 const { startWebSocketProxy } = require('./lib/websocket-proxy.cjs');
 
 const bridgeRoot = __dirname;
 const pxlogicRoot = path.resolve(bridgeRoot, '..', '..');
+
+function parseInjectionStats(line) {
+  const match = String(line).match(
+    /^\[logic2-bridge:inject\] callback=(\d+) buffer=(\d+) injected=(\d+) queued=(\d+) total=(\d+) underflows=(\d+) dropped=(\d+)$/,
+  );
+  if (!match) return null;
+  return {
+    type: 'injection-progress',
+    callbackCount: Number(match[1]),
+    callbackBufferBytes: Number(match[2]),
+    callbackInjectedBytes: Number(match[3]),
+    queuedBytes: Number(match[4]),
+    injectedBytes: Number(match[5]),
+    underflows: Number(match[6]),
+    droppedBytes: Number(match[7]),
+  };
+}
 
 function parseArguments(argv) {
   const result = {
@@ -271,8 +291,53 @@ function installedAppCandidates() {
   return [...new Set(candidates)];
 }
 
+function readMacBundleIdentifier(appPath) {
+  if (process.platform !== 'darwin') return null;
+  const plist = path.join(appPath, 'Contents', 'Info.plist');
+  const result = spawnSync(
+    '/usr/libexec/PlistBuddy',
+    ['-c', 'Print :CFBundleIdentifier', plist],
+    { encoding: 'utf8' },
+  );
+  if (result.status !== 0) return null;
+  const identifier = result.stdout.trim();
+  return identifier || null;
+}
+
+function isLogicAppBundle(appPath) {
+  try {
+    if (!fs.statSync(appPath).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+  if (process.platform === 'darwin') {
+    return readMacBundleIdentifier(appPath) === 'com.saleae.saleae';
+  }
+  return fs.existsSync(path.join(appPath, 'Contents', 'Info.plist'));
+}
+
+function logicAppCandidatesFromPath(selectedPath) {
+  const normalized = path.resolve(selectedPath);
+  if (isLogicAppBundle(normalized)) return [normalized];
+  if (process.platform !== 'darwin') return [];
+  let entries;
+  try {
+    entries = fs.readdirSync(normalized, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter(entry => entry.isDirectory() && entry.name.toLowerCase().endsWith('.app'))
+    .map(entry => path.join(normalized, entry.name))
+    .filter(isLogicAppBundle)
+    .sort();
+}
+
 function resolveAppPath(explicitPath) {
-  if (explicitPath) return path.resolve(explicitPath);
+  if (explicitPath) {
+    const selected = logicAppCandidatesFromPath(explicitPath);
+    return selected[0] || path.resolve(explicitPath);
+  }
   const found = installedAppCandidates().find(candidate =>
     fs.existsSync(path.join(candidate, 'Contents', 'Info.plist')),
   );
@@ -605,6 +670,13 @@ async function main() {
     throw new Error('The public proxy and private GraphServer ports must differ');
   }
 
+  const graphLogMonitor = new GraphLogMonitor(logPath, {
+    onFailure: event => console.error(bridgeEventLine(event)),
+  });
+  // Establish the session boundary before starting GraphServer. The file is
+  // intentionally append-only across Bridge runs, so historical assertions
+  // must never be replayed as a current failure.
+  graphLogMonitor.poll();
   const host = spawn(nativeHost, [
     runtime.sharedLibrary,
     runtime.pythonHome,
@@ -620,8 +692,14 @@ async function main() {
     // searches for its bundled runtime files.
     cwd: process.platform === 'win32' ? runtime.appPath : stateRoot,
     env: process.env,
-    stdio: ['pipe', 'pipe', 'inherit'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: process.platform === 'win32',
+  });
+  graphLogMonitor.start();
+  createLineReader(host.stderr, line => {
+    console.error(line);
+    const stats = parseInjectionStats(line);
+    if (stats) console.error(bridgeEventLine(stats));
   });
   if (process.platform === 'win32') {
     console.log('[logic2-bridge] Windows GraphServer will select its backend port');
@@ -661,10 +739,15 @@ async function main() {
       startupTimeoutMs,
     );
     controller = new PxlogicCaptureController(options, host);
+    const graphActionGuard = new GraphActionGuard();
     proxy = await startWebSocketProxy({
       port: options.port,
       backendPort: actualBackendPort,
-      observeText: message => controller.observeRequest(message),
+      observeText: async message => {
+        const transformed = graphActionGuard.transform(message);
+        await controller.observeRequest(message);
+        return transformed;
+      },
     });
     if (options.port !== 0 && proxy.port !== options.port) {
       console.log(
@@ -701,17 +784,22 @@ async function main() {
         new Promise(resolve => setTimeout(resolve, 3000)),
       ]);
     }
+    graphLogMonitor.poll();
+    graphLogMonitor.stop();
   }
 }
 
 module.exports = {
   installedAppCandidates,
+  isLogicAppBundle,
+  logicAppCandidatesFromPath,
   loadRuntimeCompatibilityProfiles,
   logicProcessEnvironment,
   macMaximizeScript,
   nativeGraphStartupTimeoutMs,
   nativeHookArguments,
   parseArguments,
+  parseInjectionStats,
   readAppVersion,
   resolveAppPath,
   resolveRuntime,

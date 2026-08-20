@@ -1,6 +1,6 @@
 {
   "name": "pxlogic-logic2-bridge-tauri-client",
-  "version": "0.3.0",
+  "version": "0.6.0",
   "private": true,
   "description": "Lightweight desktop launcher for the PXLogic Logic 2 live bridge",
   "scripts": {

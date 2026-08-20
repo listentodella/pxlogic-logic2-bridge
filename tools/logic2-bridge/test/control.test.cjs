@@ -4,12 +4,68 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   PxlogicCaptureController,
+  bridgeEventLine,
   buildPxlogicHelperArguments,
   buildPxlogicPrepareArguments,
+  classifyPxlogicHelperExit,
   describeDigitalTrigger,
   extractLogicRequests,
   parseThresholdVolts,
 } = require('../lib/capture-controller.cjs');
+
+test('classifies a unique ready USB address replacement as re-enumeration', () => {
+  const failure = classifyPxlogicHelperExit('usb:16c0:05dc:3:8', 1, [{
+    id: 'usb:16c0:05dc:3:10',
+    vid: 0x16c0,
+    pid: 0x05dc,
+    ready: true,
+  }]);
+  assert.deepEqual(failure, {
+    code: 'PXLOGIC_USB_REENUMERATED',
+    detail: 'USB device changed address from usb:16c0:05dc:3:8 to usb:16c0:05dc:3:10',
+    recoveryAction: 'rescan-and-restart',
+  });
+});
+
+test('does not guess which device re-enumerated when matches are ambiguous', () => {
+  const failure = classifyPxlogicHelperExit('usb:16c0:05dc:3:8', 1, [
+    { id: 'usb:16c0:05dc:3:10', vid: 0x16c0, pid: 0x05dc, ready: true },
+    { id: 'usb:16c0:05dc:4:2', vid: 0x16c0, pid: 0x05dc, ready: true },
+  ]);
+  assert.deepEqual(failure, {
+    code: 'PXLOGIC_HELPER_EXITED',
+    detail: 'helper exited with code 1',
+  });
+});
+
+test('does not report re-enumeration while the selected USB address still exists', () => {
+  const failure = classifyPxlogicHelperExit('usb:16c0:05dc:3:8', 1, [
+    { id: 'usb:16c0:05dc:3:8', vid: 0x16c0, pid: 0x05dc, ready: false },
+    { id: 'usb:16c0:05dc:3:10', vid: 0x16c0, pid: 0x05dc, ready: true },
+  ]);
+  assert.equal(failure.code, 'PXLOGIC_HELPER_EXITED');
+});
+
+test('keeps non-USB helper failures generic', () => {
+  assert.deepEqual(classifyPxlogicHelperExit('fake:test', 2, [{
+    id: 'usb:16c0:05dc:3:10', vid: 0x16c0, pid: 0x05dc, ready: true,
+  }]), {
+    code: 'PXLOGIC_HELPER_EXITED',
+    detail: 'helper exited with code 2',
+  });
+});
+
+test('serializes machine-readable bridge events for desktop recovery', () => {
+  assert.equal(
+    bridgeEventLine({
+      type: 'capture-unavailable',
+      code: 'PXLOGIC_HELPER_EXITED',
+      recoveryAction: 'restart-bridge',
+    }),
+    '[logic2-bridge:event] {"type":"capture-unavailable","code":' +
+      '"PXLOGIC_HELPER_EXITED","recoveryAction":"restart-bridge"}',
+  );
+});
 
 test('passes the Bridge hardware threshold to PXLogic without rescaling', () => {
   const arguments_ = buildPxlogicHelperArguments({
@@ -69,7 +125,7 @@ test('keeps nominal voltage and GraphServer trigger semantics', () => {
   }), /^D2 positive pulse/);
 });
 
-test('observes a Logic trigger without storing PXLogic hardware trigger state', () => {
+test('records the Logic trigger description without enabling a PXLogic hardware trigger', () => {
   const controller = new PxlogicCaptureController({
     enabledChannels: [0, 1, 2, 3, 4],
     sampleRateHz: 50_000_000,
@@ -84,6 +140,7 @@ test('observes a Logic trigger without storing PXLogic hardware trigger state', 
     enabledChannels: [0, 1, 2, 3, 4],
     sampleRateHz: 50_000_000,
     thresholdVolts: 1.8,
+    triggerDescription: 'D4 rising',
     logicSoftwareGlitchFilterWidths: {},
   });
 });
