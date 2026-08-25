@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
+    <title>PXLogic 状态</title>
+    <link rel="stylesheet" href="status-panel.css">
+  </head>
+  <body>
+    <header class="panel-header">
+      <div>
+        <div class="eyebrow">PXLOGIC BRIDGE</div>
+        <h1>采集状态</h1>
+      </div>
+      <button id="hide-button" class="icon-button" type="button" title="隐藏状态面板" aria-label="隐藏状态面板">×</button>
+    </header>
+
+    <main>
+      <section class="hero-status">
+        <span id="state-dot" class="state-dot"></span>
+        <div>
+          <strong id="state-label">待机</strong>
+          <span id="state-detail">等待 Logic 2 启动</span>
+        </div>
+      </section>
+
+      <section class="metric-grid" aria-live="polite">
+        <div class="metric"><span>实际通道</span><strong id="channels">--</strong></div>
+        <div class="metric"><span>Logic 采样率</span><strong id="logic-rate">--</strong></div>
+        <div class="metric"><span>硬件有效率</span><strong id="effective-rate">--</strong></div>
+        <div class="metric"><span>PXView 模式</span><strong id="stream-mode">--</strong></div>
+        <div class="metric"><span>硬件阈值</span><strong id="threshold">--</strong></div>
+        <div class="metric"><span>USB 链路</span><strong id="usb-speed">--</strong></div>
+      </section>
+
+      <section class="quality-section">
+        <div class="quality-heading">
+          <span>数据链路</span>
+          <strong id="quality-label">待统计</strong>
+        </div>
+        <div class="quality-bar"><span id="quality-fill"></span></div>
+        <p id="quality-detail">开始采集后显示注入、下溢和丢弃统计</p>
+      </section>
+
+      <section class="device-section">
+        <span>设备</span>
+        <strong id="device-label">PXLogic</strong>
+        <small id="device-serial">序列号 --</small>
+      </section>
+    </main>
+
+    <footer>
+      <button id="main-button" type="button">打开 Bridge</button>
+      <span id="endpoint">WebSocket --</span>
+    </footer>
+    <script src="status-panel.js"></script>
+  </body>
+</html>

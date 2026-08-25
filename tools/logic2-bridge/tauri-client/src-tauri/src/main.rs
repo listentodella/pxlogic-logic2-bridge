@@ -251,6 +251,8 @@ struct BridgeRuntimeEvent {
     #[serde(default)]
     failed: Option<bool>,
     #[serde(default)]
+    logic_sample_rate_hz: Option<u64>,
+    #[serde(default)]
     sample_rate_hz: Option<u64>,
     #[serde(default)]
     enabled_channels: Option<Vec<u8>>,
@@ -278,12 +280,29 @@ struct BridgeRuntimeEvent {
     underflows: Option<u64>,
     #[serde(default)]
     dropped_bytes: Option<u64>,
+    #[serde(default)]
+    pxlogic_usb_speed: Option<String>,
+    #[serde(default)]
+    pxlogic_logic_mode: Option<u32>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    mode_physical_channels: Option<u8>,
+    #[serde(default)]
+    effective_sample_rate_hz: Option<u64>,
+    #[serde(default)]
+    mode_max_sample_rate_hz: Option<u64>,
+    #[serde(default)]
+    supported: Option<bool>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CaptureTelemetry {
     status: String,
+    logic_sample_rate_hz: Option<u64>,
     sample_rate_hz: Option<u64>,
     enabled_channels: Vec<u8>,
     channel_span: Option<u64>,
@@ -298,12 +317,21 @@ struct CaptureTelemetry {
     injected_bytes: Option<u64>,
     underflows: Option<u64>,
     dropped_bytes: Option<u64>,
+    pxlogic_usb_speed: Option<String>,
+    pxlogic_logic_mode: Option<u32>,
+    pxlogic_mode: Option<String>,
+    pxlogic_mode_physical_channels: Option<u8>,
+    pxlogic_effective_sample_rate_hz: Option<u64>,
+    pxlogic_mode_max_sample_rate_hz: Option<u64>,
+    pxlogic_supported: Option<bool>,
+    pxlogic_reason: Option<String>,
 }
 
 impl Default for CaptureTelemetry {
     fn default() -> Self {
         Self {
             status: "idle".to_string(),
+            logic_sample_rate_hz: None,
             sample_rate_hz: None,
             enabled_channels: Vec::new(),
             channel_span: None,
@@ -318,6 +346,14 @@ impl Default for CaptureTelemetry {
             injected_bytes: None,
             underflows: None,
             dropped_bytes: None,
+            pxlogic_usb_speed: None,
+            pxlogic_logic_mode: None,
+            pxlogic_mode: None,
+            pxlogic_mode_physical_channels: None,
+            pxlogic_effective_sample_rate_hz: None,
+            pxlogic_mode_max_sample_rate_hz: None,
+            pxlogic_supported: None,
+            pxlogic_reason: None,
         }
     }
 }
@@ -418,6 +454,7 @@ struct RuntimeState {
 struct AppState {
     runtime: Mutex<RuntimeState>,
     bridge_state: Mutex<BridgeState>,
+    hardware: Mutex<PxlogicHardwareState>,
     capture_telemetry: Mutex<CaptureTelemetry>,
     logs: Mutex<VecDeque<String>>,
     previous_session_logs: Mutex<Vec<String>>,
@@ -430,6 +467,7 @@ impl Default for AppState {
         Self {
             runtime: Mutex::new(RuntimeState::default()),
             bridge_state: Mutex::new(BridgeState::default()),
+            hardware: Mutex::new(PxlogicHardwareState::failure("尚未扫描 PXLogic 设备")),
             capture_telemetry: Mutex::new(CaptureTelemetry::default()),
             logs: Mutex::new(VecDeque::new()),
             previous_session_logs: Mutex::new(Vec::new()),
@@ -1947,20 +1985,45 @@ fn apply_capture_runtime_event(
     event: &BridgeRuntimeEvent,
 ) -> bool {
     match event.event_type.as_str() {
+        "capture-plan" => {
+            if telemetry.status == "idle" {
+                telemetry.status = "configured".to_string();
+            }
+            telemetry.logic_sample_rate_hz = event
+                .logic_sample_rate_hz
+                .or(telemetry.logic_sample_rate_hz);
+            telemetry.sample_rate_hz = event
+                .effective_sample_rate_hz
+                .or(event.sample_rate_hz)
+                .or(telemetry.sample_rate_hz);
+            if let Some(channels) = event.enabled_channels.as_ref() {
+                telemetry.enabled_channels.clone_from(channels);
+            }
+            telemetry.channel_span = event.channel_span.or(telemetry.channel_span);
+            apply_pxlogic_plan(telemetry, event);
+        }
         "capture-starting" => {
             *telemetry = CaptureTelemetry {
                 status: "starting".to_string(),
-                sample_rate_hz: event.sample_rate_hz,
+                logic_sample_rate_hz: event.logic_sample_rate_hz.or(event.sample_rate_hz),
+                sample_rate_hz: event.effective_sample_rate_hz.or(event.sample_rate_hz),
                 enabled_channels: event.enabled_channels.clone().unwrap_or_default(),
                 channel_span: event.channel_span,
                 threshold_volts: event.threshold_volts,
                 trigger_description: event.trigger_description.clone(),
                 ..CaptureTelemetry::default()
             };
+            apply_pxlogic_plan(telemetry, event);
         }
         "capture-started" => {
             telemetry.status = "streaming".to_string();
-            telemetry.sample_rate_hz = event.sample_rate_hz.or(telemetry.sample_rate_hz);
+            telemetry.logic_sample_rate_hz = event
+                .logic_sample_rate_hz
+                .or(telemetry.logic_sample_rate_hz);
+            telemetry.sample_rate_hz = event
+                .effective_sample_rate_hz
+                .or(event.sample_rate_hz)
+                .or(telemetry.sample_rate_hz);
             if let Some(channels) = event.enabled_channels.as_ref() {
                 telemetry.enabled_channels.clone_from(channels);
             }
@@ -1969,6 +2032,7 @@ fn apply_capture_runtime_event(
             if let Some(trigger) = event.trigger_description.as_ref() {
                 telemetry.trigger_description = Some(trigger.clone());
             }
+            apply_pxlogic_plan(telemetry, event);
         }
         "capture-progress" => {
             if let Some(value) = event.cross_chunks {
@@ -2006,6 +2070,29 @@ fn apply_capture_runtime_event(
         _ => return false,
     }
     true
+}
+
+fn apply_pxlogic_plan(telemetry: &mut CaptureTelemetry, event: &BridgeRuntimeEvent) {
+    if let Some(value) = event.pxlogic_usb_speed.as_ref() {
+        telemetry.pxlogic_usb_speed = Some(value.clone());
+    }
+    telemetry.pxlogic_logic_mode = event.pxlogic_logic_mode.or(telemetry.pxlogic_logic_mode);
+    if let Some(value) = event.mode.as_ref() {
+        telemetry.pxlogic_mode = Some(value.clone());
+    }
+    telemetry.pxlogic_mode_physical_channels = event
+        .mode_physical_channels
+        .or(telemetry.pxlogic_mode_physical_channels);
+    telemetry.pxlogic_effective_sample_rate_hz = event
+        .effective_sample_rate_hz
+        .or(telemetry.pxlogic_effective_sample_rate_hz);
+    telemetry.pxlogic_mode_max_sample_rate_hz = event
+        .mode_max_sample_rate_hz
+        .or(telemetry.pxlogic_mode_max_sample_rate_hz);
+    telemetry.pxlogic_supported = event.supported.or(telemetry.pxlogic_supported);
+    if event.reason.is_some() {
+        telemetry.pxlogic_reason.clone_from(&event.reason);
+    }
 }
 
 fn append_log(app: &AppHandle, source: &str, line: &str) {
@@ -2345,6 +2432,52 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+fn show_status_panel(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if let Some(window) = app.get_webview_window("status") {
+        let _ = window.show();
+        let _ = window.set_always_on_top(true);
+    }
+}
+
+fn hide_status_panel(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("status") {
+        let _ = window.hide();
+    }
+}
+
+#[tauri::command]
+fn status_panel_show(app: AppHandle) -> Result<(), String> {
+    show_status_panel(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn status_panel_hide(app: AppHandle) -> Result<(), String> {
+    hide_status_panel(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn status_panel_toggle(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("status") else {
+        return Err("状态面板窗口不可用".to_string());
+    };
+    if window.is_visible().unwrap_or(false) {
+        hide_status_panel(&app);
+    } else {
+        show_status_panel(&app);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn main_window_show(app: AppHandle) -> Result<(), String> {
+    show_main_window(&app);
+    Ok(())
+}
+
 fn hide_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
@@ -2384,6 +2517,10 @@ async fn client_initial_state(app: AppHandle) -> Result<InitialState, String> {
     if settings_changed {
         settings = store_settings(&app, settings)?;
     }
+    if let Ok(mut current) = app.state::<AppState>().hardware.lock() {
+        current.clone_from(&hardware);
+    }
+    let _ = app.emit("pxlogic-hardware", &hardware);
     let state = app.state::<AppState>();
     let bridge_state = state
         .bridge_state
@@ -2450,11 +2587,17 @@ async fn pxlogic_scan(
     app: AppHandle,
     preferred_device_id: String,
 ) -> Result<PxlogicHardwareState, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        scan_pxlogic_hardware(&app, preferred_device_id.trim())
+    let scan_app = app.clone();
+    let hardware = tauri::async_runtime::spawn_blocking(move || {
+        scan_pxlogic_hardware(&scan_app, preferred_device_id.trim())
     })
     .await
-    .map_err(|error| format!("PXLogic 扫描任务失败: {error}"))
+    .map_err(|error| format!("PXLogic 扫描任务失败: {error}"))?;
+    if let Ok(mut current) = app.state::<AppState>().hardware.lock() {
+        current.clone_from(&hardware);
+    }
+    let _ = app.emit("pxlogic-hardware", &hardware);
+    Ok(hardware)
 }
 
 #[tauri::command]
@@ -2551,6 +2694,7 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
     }
     let selected_device_id = hardware
         .selected_device_id
+        .clone()
         .ok_or_else(|| "未检测到 PXLogic 设备".to_string())?;
     let selected_device = hardware
         .devices
@@ -2565,6 +2709,9 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
     }
     settings.pxlogic_device_id = selected_device_id;
     settings = store_settings(app, settings)?;
+    if let Ok(mut current) = app.state::<AppState>().hardware.lock() {
+        current.clone_from(&hardware);
+    }
     let payload = validate_bridge_payload(app)?;
     let executable = logic_executable(&app_path);
     let runtime_app_path = app_path.to_string_lossy().into_owned();
@@ -2589,6 +2736,22 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
         .args(["--bitstreams", &bitstreams])
         .args(["--firmware", &firmware])
         .args(["--pxlogic-device", &settings.pxlogic_device_id])
+        .args(
+            selected_device
+                .serial_number
+                .as_deref()
+                .map(|serial| ["--pxlogic-serial", serial])
+                .into_iter()
+                .flatten(),
+        )
+        .args([
+            "--pxlogic-usb-speed",
+            selected_device.usb_speed.as_deref().unwrap_or("high"),
+        ])
+        .args([
+            "--pxlogic-logic-mode",
+            &selected_device.logic_mode.unwrap_or(0).to_string(),
+        ])
         .args([
             "--hardware-threshold-volts",
             &settings.pxlogic_threshold_volts.to_string(),
@@ -2661,6 +2824,7 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
             inspection.version.unwrap_or_default()
         ),
     );
+    show_status_panel(app);
     read_process_lines(app.clone(), "bridge", stdout);
     read_process_lines(app.clone(), "runtime", stderr);
     monitor_bridge(app.clone(), token);
@@ -2956,6 +3120,7 @@ fn manual_open(app: AppHandle) -> Result<(), String> {
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let menu = MenuBuilder::new(app)
         .text("show", "显示 PXLogic Bridge")
+        .text("status", "显示状态面板")
         .separator()
         .text("stop", "停止 Bridge")
         .separator()
@@ -2968,6 +3133,7 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .icon_as_template(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main_window(app),
+            "status" => show_status_panel(app),
             "stop" => {
                 let _ = request_stop(app);
             }
@@ -3017,6 +3183,10 @@ fn main() {
             diagnostics_export,
             logs_open,
             manual_open,
+            status_panel_show,
+            status_panel_hide,
+            status_panel_toggle,
+            main_window_show,
         ])
         .setup(setup_tray)
         .on_window_event(|window, event| {
@@ -3028,7 +3198,11 @@ fn main() {
                     .load(Ordering::Acquire)
                 {
                     api.prevent_close();
-                    hide_main_window(window.app_handle());
+                    if window.label() == "status" {
+                        hide_status_panel(window.app_handle());
+                    } else {
+                        hide_main_window(window.app_handle());
+                    }
                 }
             }
         })
@@ -3225,6 +3399,26 @@ mod tests {
         assert_eq!(telemetry.injected_bytes, Some(8_388_608));
         assert_eq!(telemetry.underflows, Some(2));
         assert_eq!(telemetry.dropped_bytes, Some(0));
+    }
+
+    #[test]
+    fn keeps_pxlogic_hardware_plan_for_the_compact_status_panel() {
+        let mut telemetry = CaptureTelemetry::default();
+        let plan = parse_bridge_runtime_event(
+            r#"[logic2-bridge:event] {"type":"capture-plan","logicSampleRateHz":125000000,"sampleRateHz":50000000,"enabledChannels":[0,1,2,3],"channelSpan":4,"pxlogicUsbSpeed":"super","pxlogicLogicMode":0,"mode":"STREAM_LOGIC500x4","modePhysicalChannels":4,"effectiveSampleRateHz":50000000,"modeMaxSampleRateHz":500000000,"supported":true}"#,
+        )
+        .unwrap();
+
+        assert!(apply_capture_runtime_event(&mut telemetry, &plan));
+        assert_eq!(telemetry.status, "configured");
+        assert_eq!(telemetry.logic_sample_rate_hz, Some(125_000_000));
+        assert_eq!(telemetry.sample_rate_hz, Some(50_000_000));
+        assert_eq!(telemetry.pxlogic_usb_speed.as_deref(), Some("super"));
+        assert_eq!(telemetry.pxlogic_mode.as_deref(), Some("STREAM_LOGIC500x4"));
+        assert_eq!(telemetry.pxlogic_mode_physical_channels, Some(4));
+        assert_eq!(telemetry.pxlogic_effective_sample_rate_hz, Some(50_000_000));
+        assert_eq!(telemetry.pxlogic_mode_max_sample_rate_hz, Some(500_000_000));
+        assert_eq!(telemetry.pxlogic_supported, Some(true));
     }
 
     #[test]

@@ -47,6 +47,63 @@ function physicalChannelSpan(enabledChannels) {
   return Math.max(...normalizeEnabledChannels(enabledChannels)) + 1;
 }
 
+const PXVIEW_STREAM_MODES = Object.freeze({
+  super: Object.freeze({
+    0: [['STREAM_LOGIC50x32', 32, 50_000_000], ['STREAM_LOGIC125x16', 16, 125_000_000], ['STREAM_LOGIC250x8', 8, 250_000_000], ['STREAM_LOGIC500x4', 4, 500_000_000], ['STREAM_LOGIC1000x2', 2, 1_000_000_000]],
+    1: [['STREAM_LOGIC125x16', 16, 125_000_000], ['STREAM_LOGIC250x8', 8, 250_000_000], ['STREAM_LOGIC500x4', 4, 500_000_000], ['STREAM_LOGIC1000x2', 2, 1_000_000_000]],
+    2: [['STREAM_LOGIC125x16', 16, 125_000_000], ['STREAM_LOGIC250x8', 8, 250_000_000], ['STREAM_LOGIC500x4', 4, 500_000_000]],
+    3: [['STREAM_LOGIC125x16', 16, 125_000_000], ['STREAM_LOGIC250x8', 8, 250_000_000]],
+  }),
+  high: Object.freeze({
+    0: [['STREAM_LOGIC200x1', 1, 200_000_000], ['STREAM_LOGIC100x2', 2, 100_000_000], ['STREAM_LOGIC50x4', 4, 50_000_000], ['STREAM_LOGIC25x8', 8, 25_000_000], ['STREAM_LOGIC10x16', 16, 10_000_000], ['STREAM_LOGIC5x32', 32, 5_000_000]],
+    1: [['STREAM_LOGIC200x1', 1, 200_000_000], ['STREAM_LOGIC100x2', 2, 100_000_000], ['STREAM_LOGIC50x4', 4, 50_000_000], ['STREAM_LOGIC25x8', 8, 25_000_000], ['STREAM_LOGIC10x16', 16, 10_000_000]],
+    2: [['STREAM_LOGIC200x1', 1, 200_000_000], ['STREAM_LOGIC100x2', 2, 100_000_000], ['STREAM_LOGIC50x4', 4, 50_000_000], ['STREAM_LOGIC25x8', 8, 25_000_000], ['STREAM_LOGIC10x16', 16, 10_000_000]],
+    3: [['STREAM_LOGIC200x1', 1, 200_000_000], ['STREAM_LOGIC100x2', 2, 100_000_000], ['STREAM_LOGIC50x4', 4, 50_000_000], ['STREAM_LOGIC25x8', 8, 25_000_000], ['STREAM_LOGIC10x16', 16, 10_000_000]],
+  }),
+});
+
+function pxviewStreamModes(usbSpeed, logicMode) {
+  const speed = String(usbSpeed || '').toLowerCase() === 'super' ? 'super' : 'high';
+  return PXVIEW_STREAM_MODES[speed][Number.isInteger(logicMode) ? logicMode : 0] ||
+    PXVIEW_STREAM_MODES[speed][0];
+}
+
+function resolvePxlogicStreamPlan({ usbSpeed, logicMode, enabledChannels, sampleRateHz }) {
+  const channels = normalizeEnabledChannels(enabledChannels);
+  const channelSpan = physicalChannelSpan(channels);
+  const modes = pxviewStreamModes(usbSpeed, logicMode);
+  const candidates = modes
+    .filter(([, physicalChannels, maxRate]) => physicalChannels >= channelSpan && sampleRateHz <= maxRate)
+    .sort((left, right) => left[1] - right[1] || left[2] - right[2]);
+  const selected = candidates[0] || modes
+    .filter(([, physicalChannels]) => physicalChannels >= channelSpan)
+    .sort((left, right) => right[2] - left[2] || left[1] - right[1])[0];
+  if (!selected) {
+    return {
+      supported: false,
+      reason: `PXView Stream 不支持物理通道跨度 ${channelSpan}`,
+      channelSpan,
+      enabledLaneCount: channels.length,
+      availableModes: modes.map(([id, physicalChannels, maxRate]) => ({ id, physicalChannels, maxRate })),
+    };
+  }
+  const [, physicalChannels, maxRate] = selected;
+  return {
+    supported: sampleRateHz <= maxRate,
+    reason: sampleRateHz <= maxRate ? null : `请求采样率超过 ${selected[0]} 上限`,
+    channelSpan,
+    enabledLaneCount: channels.length,
+    mode: selected[0],
+    modePhysicalChannels: physicalChannels,
+    requestedSampleRateHz: sampleRateHz,
+    effectiveSampleRateHz: Math.min(sampleRateHz, maxRate),
+    modeMaxSampleRateHz: maxRate,
+    availableModes: modes.map(([id, modeChannels, modeMaxRate]) => ({
+      id, physicalChannels: modeChannels, maxRate: modeMaxRate,
+    })),
+  };
+}
+
 function extractLogicRequests(message) {
   let wrapped;
   try {
@@ -112,12 +169,18 @@ function buildPxlogicHelperArguments(options, captureSettings) {
     '--glitch-filter',
   ];
   if (options.pxlogicDevice) helperArguments.unshift('--device', options.pxlogicDevice);
+  if (options.pxlogicSerialNumber) {
+    helperArguments.unshift('--device-serial', options.pxlogicSerialNumber);
+  }
   return helperArguments;
 }
 
 function buildPxlogicPrepareArguments(options) {
   const helperArguments = ['--prepare-only'];
   if (options.pxlogicDevice) helperArguments.unshift('--device', options.pxlogicDevice);
+  if (options.pxlogicSerialNumber) {
+    helperArguments.unshift('--device-serial', options.pxlogicSerialNumber);
+  }
   return helperArguments;
 }
 
@@ -457,6 +520,24 @@ class PxlogicCaptureController {
     this.captureUnavailableReason = undefined;
   }
 
+  emitCapturePlan(sessionId, settings) {
+    const plan = resolvePxlogicStreamPlan({
+      usbSpeed: this.options.pxlogicUsbSpeed,
+      logicMode: this.options.pxlogicLogicMode,
+      enabledChannels: settings.enabledChannels,
+      sampleRateHz: settings.sampleRateHz,
+    });
+    emitBridgeEvent({
+      type: 'capture-plan',
+      sessionId: sessionId ?? 'default',
+      logicSampleRateHz: settings.sampleRateHz,
+      enabledChannels: settings.enabledChannels,
+      pxlogicUsbSpeed: this.options.pxlogicUsbSpeed,
+      pxlogicLogicMode: this.options.pxlogicLogicMode,
+      ...plan,
+    });
+  }
+
   getSessionSettings(sessionId) {
     const key = String(sessionId ?? 'default');
     let settings = this.sessions.get(key);
@@ -490,6 +571,7 @@ class PxlogicCaptureController {
         `[logic2-bridge:control] session=${sessionId ?? 'default'} channels=` +
         (settings.enabledChannels.length ? `D${settings.enabledChannels.join(',D')}` : 'none'),
       );
+      this.emitCapturePlan(sessionId, settings);
     } else if (action.type === 'Saleae::Graph::LogicDevice::SetSampleRate' &&
                Number.isInteger(action.digital) && action.digital > 0) {
       settings.sampleRateHz = action.digital;
@@ -497,6 +579,7 @@ class PxlogicCaptureController {
         `[logic2-bridge:control] session=${sessionId ?? 'default'} ` +
         `digital-rate=${settings.sampleRateHz}`,
       );
+      this.emitCapturePlan(sessionId, settings);
     } else if (action.type === 'Saleae::Graph::LogicDevice::SetDigitalVoltageThreshold') {
       settings.thresholdVolts = parseThresholdVolts(action.thresholdDescription);
       const hardwareThreshold = this.options.hardwareThresholdVolts ?? settings.thresholdVolts;
@@ -549,6 +632,13 @@ class PxlogicCaptureController {
       thresholdVolts: this.options.hardwareThresholdVolts ?? settings.thresholdVolts,
       triggerDescription: settings.triggerDescription,
     };
+    const plan = resolvePxlogicStreamPlan({
+      usbSpeed: this.options.pxlogicUsbSpeed,
+      logicMode: this.options.pxlogicLogicMode,
+      enabledChannels: captureSettings.enabledChannels,
+      sampleRateHz: captureSettings.sampleRateHz,
+    });
+    if (plan.effectiveSampleRateHz) captureSettings.sampleRateHz = plan.effectiveSampleRateHz;
     console.error(
       `[logic2-bridge:control] StartCapture session=${sessionId ?? 'default'} ` +
       `rate=${captureSettings.sampleRateHz} ` +
@@ -558,10 +648,14 @@ class PxlogicCaptureController {
     );
     emitBridgeEvent({
       type: 'capture-starting',
+      logicSampleRateHz: settings.sampleRateHz,
       sampleRateHz: captureSettings.sampleRateHz,
       enabledChannels: captureSettings.enabledChannels,
       thresholdVolts: captureSettings.thresholdVolts,
       triggerDescription: captureSettings.triggerDescription,
+      pxlogicUsbSpeed: this.options.pxlogicUsbSpeed,
+      pxlogicLogicMode: this.options.pxlogicLogicMode,
+      ...plan,
     });
     const feeder = startPxlogicFeeder(this.options, this.host, captureSettings);
     this.activeFeeder = feeder;
@@ -630,5 +724,7 @@ module.exports = {
   extractLogicRequests,
   parseThresholdVolts,
   physicalChannelSpan,
+  pxviewStreamModes,
+  resolvePxlogicStreamPlan,
   preparePxlogicDevice,
 };

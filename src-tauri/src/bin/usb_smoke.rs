@@ -25,6 +25,7 @@ use pxlogic_waveform::WaveformRequest;
 #[derive(Debug)]
 struct Options {
     device_id: Option<String>,
+    device_serial: Option<String>,
     sample_rate_hz: u64,
     duration_ms: u64,
     channel_count: u8,
@@ -70,6 +71,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             device_id: None,
+            device_serial: None,
             sample_rate_hz: 25_000_000,
             duration_ms: 10,
             channel_count: 16,
@@ -138,8 +140,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let selected = select_device(&devices, options.device_id.as_deref())
-        .map_err(|error| -> Box<dyn Error> { error.into() })?;
+    let selected = select_device(
+        &devices,
+        options.device_id.as_deref(),
+        options.device_serial.as_deref(),
+    )
+    .map_err(|error| -> Box<dyn Error> { error.into() })?;
     let device_id = &selected.id;
     println!("selected: {device_id}");
     if !selected.ready {
@@ -522,14 +528,40 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn select_device<'a>(
     devices: &'a [DeviceInfo],
     requested_id: Option<&str>,
+    requested_serial: Option<&str>,
 ) -> Result<&'a DeviceInfo, String> {
     if let Some(requested_id) = requested_id {
-        return devices
+        if let Some(device) = devices.iter().find(|device| device.id == requested_id) {
+            if requested_serial
+                .map(str::trim)
+                .filter(|serial| !serial.is_empty())
+                .is_none_or(|serial| device.serial_number.as_deref() == Some(serial))
+            {
+                return Ok(device);
+            }
+        }
+    }
+    if let Some(requested_serial) = requested_serial
+        .map(str::trim)
+        .filter(|serial| !serial.is_empty())
+    {
+        let matches = devices
             .iter()
-            .find(|device| device.id == requested_id)
-            .ok_or_else(|| {
-                format!("selected device is no longer available: {requested_id}; rescan required")
-            });
+            .filter(|device| device.serial_number.as_deref() == Some(requested_serial))
+            .collect::<Vec<_>>();
+        if matches.len() == 1 {
+            return Ok(matches[0]);
+        }
+        if matches.len() > 1 {
+            return Err(format!(
+                "multiple PXLogic devices match serial {requested_serial}; rescan required"
+            ));
+        }
+    }
+    if let Some(requested_id) = requested_id {
+        return Err(format!(
+            "selected device is no longer available: {requested_id}; rescan required"
+        ));
     }
     devices
         .iter()
@@ -544,6 +576,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--device" => options.device_id = Some(next_arg(&mut args, "--device")?),
+            "--device-serial" => {
+                options.device_serial = Some(next_arg(&mut args, "--device-serial")?)
+            }
             "--rate" => options.sample_rate_hz = next_arg(&mut args, "--rate")?.parse()?,
             "--ms" => options.duration_ms = next_arg(&mut args, "--ms")?.parse()?,
             "--channels" => options.channel_count = next_arg(&mut args, "--channels")?.parse()?,
@@ -694,7 +729,7 @@ fn parse_enabled_channels(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "usb_smoke [--list-only|--list-json] [--prepare-only|--skip-prepare] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--trigger-high-mask mask] [--trigger-low-mask mask] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--live] [--live-cross-only] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
+        "usb_smoke [--list-only|--list-json] [--prepare-only|--skip-prepare] [--flash-mcu] [--device id] [--device-serial serial] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--trigger-high-mask mask] [--trigger-low-mask mask] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--live] [--live-cross-only] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
     );
 }
 
@@ -1199,9 +1234,39 @@ mod tests {
     #[test]
     fn requested_device_must_still_exist() {
         let devices = vec![device("usb:16c0:05dc:3:10", true)];
-        let error = select_device(&devices, Some("usb:16c0:05dc:3:8")).unwrap_err();
+        let error = select_device(&devices, Some("usb:16c0:05dc:3:8"), None).unwrap_err();
         assert!(error.contains("no longer available"));
         assert!(error.contains("rescan required"));
+    }
+
+    #[test]
+    fn reenumerated_device_is_selected_by_stable_serial() {
+        let mut replacement = device("usb:16c0:05dc:3:9", true);
+        replacement.serial_number = Some("569000284250304330303719".to_string());
+        let devices = vec![replacement];
+        let selected = select_device(
+            &devices,
+            Some("usb:16c0:05dc:3:11"),
+            Some("569000284250304330303719"),
+        )
+        .unwrap();
+        assert_eq!(selected.id, "usb:16c0:05dc:3:9");
+    }
+
+    #[test]
+    fn stable_serial_wins_when_an_old_address_is_reused() {
+        let mut reused_address = device("usb:16c0:05dc:3:11", true);
+        reused_address.serial_number = Some("other-device".to_string());
+        let mut replacement = device("usb:16c0:05dc:3:9", true);
+        replacement.serial_number = Some("569000284250304330303719".to_string());
+        let devices = [reused_address, replacement];
+        let selected = select_device(
+            &devices,
+            Some("usb:16c0:05dc:3:11"),
+            Some("569000284250304330303719"),
+        )
+        .unwrap();
+        assert_eq!(selected.id, "usb:16c0:05dc:3:9");
     }
 
     #[test]
@@ -1211,7 +1276,7 @@ mod tests {
             device("usb:16c0:05dc:3:10", true),
         ];
         assert_eq!(
-            select_device(&devices, None).unwrap().id,
+            select_device(&devices, None, None).unwrap().id,
             "usb:16c0:05dc:3:10"
         );
     }

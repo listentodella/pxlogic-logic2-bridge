@@ -18,6 +18,21 @@
         "minHeight": 660,
         "center": true,
         "resizable": true
+      },
+      {
+        "label": "status",
+        "title": "PXLogic 状态",
+        "url": "status-panel.html",
+        "width": 340,
+        "height": 390,
+        "minWidth": 300,
+        "minHeight": 300,
+        "center": false,
+        "resizable": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false
       }
     ],
     "security": {

@@ -14,6 +14,9 @@
         <h1>PXLogic Bridge</h1>
         <p>Logic 2 Live Capture</p>
       </div>
+      <button id="status-panel-button" class="header-button" type="button" hidden>
+        显示状态面板
+      </button>
       <div id="status" class="status status-stopped">
         <span class="status-dot"></span>
         <span id="status-label">待机</span>
@@ -180,6 +183,7 @@
           <div><span>丢弃 / 下溢</span><strong id="capture-loss">待统计</strong></div>
         </div>
         <p class="telemetry-detail">Logic 2 触发设置：<strong id="capture-trigger">--</strong></p>
+        <p class="telemetry-detail">PXView 配置映射：<strong id="capture-mapping">等待采集设置</strong></p>
       </section>
 
       <section class="activity-section">

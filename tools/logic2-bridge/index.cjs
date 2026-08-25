@@ -56,6 +56,9 @@ function parseArguments(argv) {
         process.platform === 'win32' ? 'usb_smoke.exe' : 'usb_smoke',
       ),
     pxlogicDevice: undefined,
+    pxlogicSerialNumber: undefined,
+    pxlogicUsbSpeed: undefined,
+    pxlogicLogicMode: undefined,
     bitstreams: process.env.PXLOGIC_BITSTREAM_DIR ||
       path.join(pxlogicRoot, 'resources', 'bitstreams'),
     firmware: process.env.PXLOGIC_MCU_FIRMWARE ||
@@ -84,6 +87,9 @@ function parseArguments(argv) {
     else if (argument === '--backend-port') result.backendPort = Number(argv[++index]);
     else if (argument === '--pxlogic-helper') result.pxlogicHelper = path.resolve(argv[++index]);
     else if (argument === '--pxlogic-device') result.pxlogicDevice = argv[++index];
+    else if (argument === '--pxlogic-serial') result.pxlogicSerialNumber = argv[++index];
+    else if (argument === '--pxlogic-usb-speed') result.pxlogicUsbSpeed = argv[++index];
+    else if (argument === '--pxlogic-logic-mode') result.pxlogicLogicMode = Number(argv[++index]);
     else if (argument === '--bitstreams') result.bitstreams = path.resolve(argv[++index]);
     else if (argument === '--firmware') result.firmware = path.resolve(argv[++index]);
     else if (argument === '--enabled-channels') {
@@ -157,6 +163,9 @@ Options:
   --backend-port PORT        Private GraphServer port (default: automatic)
   --pxlogic-helper FILE      PXLogic usb_smoke executable
   --pxlogic-device ID        Select one PXLogic USB device
+  --pxlogic-serial SERIAL    Stable PXLogic USB serial used across re-enumeration
+  --pxlogic-usb-speed VALUE  PXLogic USB speed from the device probe
+  --pxlogic-logic-mode N     PXLogic logic mode from the device probe
   --bitstreams DIR           PXLogic FPGA bitstream directory
   --firmware FILE            PXLogic MCU firmware image
   --enabled-channels LIST    Initial channels before Logic sends settings (default: 0,1,2,3)

@@ -107,6 +107,27 @@ footer p {
   font-weight: 600;
 }
 
+.header-button {
+  min-height: 30px;
+  margin-left: auto;
+  padding: 0 11px;
+  color: #d8dadd;
+  background: #2d3035;
+  border: 1px solid #555a62;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.header-button:hover {
+  color: #ffffff;
+  border-color: #7c828b;
+}
+
+.header-button + .status {
+  margin-left: 0;
+}
+
 .status-dot {
   width: 7px;
   height: 7px;

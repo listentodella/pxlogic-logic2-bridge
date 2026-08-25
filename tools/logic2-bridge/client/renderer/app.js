@@ -19,6 +19,9 @@ function createTauriApi() {
     exportDiagnostics: () => invoke('diagnostics_export'),
     openLogs: () => invoke('logs_open'),
     openManual: () => invoke('manual_open'),
+    showStatusPanel: () => invoke('status_panel_show'),
+    hideStatusPanel: () => invoke('status_panel_hide'),
+    toggleStatusPanel: () => invoke('status_panel_toggle'),
     onState: callback => void listen('bridge-state', event => callback(event.payload)),
     onTelemetry: callback => void listen('capture-telemetry', event => callback(event.payload)),
     onLog: callback => void listen('bridge-log', event => callback(event.payload)),
@@ -83,6 +86,7 @@ const elements = {
   captureQueued: document.querySelector('#capture-queued'),
   captureLoss: document.querySelector('#capture-loss'),
   captureTrigger: document.querySelector('#capture-trigger'),
+  captureMapping: document.querySelector('#capture-mapping'),
   logOutput: document.querySelector('#log-output'),
   recoveryPanel: document.querySelector('#recovery-panel'),
   recoveryTitle: document.querySelector('#recovery-title'),
@@ -92,6 +96,7 @@ const elements = {
   openLogsButton: document.querySelector('#open-logs-button'),
   footerMessage: document.querySelector('#footer-message'),
   startButton: document.querySelector('#start-button'),
+  statusPanelButton: document.querySelector('#status-panel-button'),
 };
 
 let portMode = 'auto';
@@ -330,6 +335,30 @@ function formatBytes(bytes) {
   return `${value.toFixed(precision)} ${units[unit]}`;
 }
 
+function resolvePxviewStreamMode(device, channelCount, sampleRateHz) {
+  const speed = String(device?.usbSpeed || '').toLowerCase();
+  const modes = speed === 'super'
+    ? [
+      ['STREAM_LOGIC50x32', 32, 50_000_000],
+      ['STREAM_LOGIC125x16', 16, 125_000_000],
+      ['STREAM_LOGIC250x8', 8, 250_000_000],
+      ['STREAM_LOGIC500x4', 4, 500_000_000],
+      ['STREAM_LOGIC1000x2', 2, 1_000_000_000],
+    ]
+    : [
+      ['STREAM_LOGIC200x1', 1, 200_000_000],
+      ['STREAM_LOGIC100x2', 2, 100_000_000],
+      ['STREAM_LOGIC50x4', 4, 50_000_000],
+      ['STREAM_LOGIC25x8', 8, 25_000_000],
+      ['STREAM_LOGIC10x16', 16, 10_000_000],
+      ['STREAM_LOGIC5x32', 32, 5_000_000],
+    ];
+  const selected = modes
+    .filter(([, channels, maxRate]) => channels >= channelCount && sampleRateHz <= maxRate)
+    .sort((left, right) => left[1] - right[1] || left[2] - right[2])[0];
+  return selected ? `${selected[0]} · ${formatRate(sampleRateHz)}` : '当前通道/采样率组合超出 PXView Stream 能力';
+}
+
 function renderTelemetry(telemetry) {
   currentTelemetry = telemetry || { status: 'idle', enabledChannels: [] };
   const statusLabels = {
@@ -403,6 +432,12 @@ function renderTelemetry(telemetry) {
     : currentTelemetry.triggerDescription
       ? `${currentTelemetry.triggerDescription}（GraphServer）`
       : '--';
+  const device = selectedHardwareDevice();
+  const channels = currentTelemetry.enabledChannels?.length || 0;
+  const rate = Number(currentTelemetry.sampleRateHz);
+  elements.captureMapping.textContent = channels > 0 && Number.isFinite(rate)
+    ? `Logic ${formatRate(rate)} / ${channels} lanes -> ${resolvePxviewStreamMode(device, channels, rate)}`
+    : '等待 Logic 2 下发通道和采样率';
 }
 
 function renderState(state) {
@@ -809,6 +844,15 @@ elements.openManualButton.addEventListener('click', async () => {
 elements.closeWarningButton.addEventListener('click', () => {
   elements.compatibilityWarning.close();
 });
+
+elements.statusPanelButton.addEventListener('click', async () => {
+  if (typeof api.toggleStatusPanel !== 'function') return;
+  try {
+    await api.toggleStatusPanel();
+  } catch (error) {
+    appendLog(`[client] 无法切换状态面板：${errorMessage(error)}`);
+  }
+});
 elements.experimentalConfirmationCheckbox.addEventListener('change', () => {
   elements.continueExperimentalButton.disabled = !elements.experimentalConfirmationCheckbox.checked;
 });
@@ -873,6 +917,9 @@ if (typeof api.onTelemetry === 'function') api.onTelemetry(renderTelemetry);
 api.onLog(appendLog);
 
 async function initialize() {
+  if (typeof api.toggleStatusPanel === 'function') {
+    elements.statusPanelButton.hidden = false;
+  }
   if (typeof api.analyzeLogicApp !== 'function') elements.analyzeButton.hidden = true;
   if (typeof api.exportDiagnostics !== 'function') elements.exportDiagnosticsButton.hidden = true;
   const initial = await api.initialState();

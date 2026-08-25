@@ -71,12 +71,14 @@ test('passes the Bridge hardware threshold to PXLogic without rescaling', () => 
   const arguments_ = buildPxlogicHelperArguments({
     captureWindowMs: 1000,
     pxlogicDevice: 'usb:test',
+    pxlogicSerialNumber: 'serial:test',
   }, {
     enabledChannels: [4, 5],
     sampleRateHz: 50_000_000,
     thresholdVolts: 1.2,
   });
   assert.equal(arguments_[arguments_.indexOf('--vth') + 1], '1.2');
+  assert.equal(arguments_[arguments_.indexOf('--device-serial') + 1], 'serial:test');
   assert.equal(arguments_.filter(argument => argument === '--skip-prepare').length, 1);
   assert.equal(arguments_.includes('--prepare-only'), false);
 });
