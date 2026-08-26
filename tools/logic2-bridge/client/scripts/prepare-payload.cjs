@@ -76,6 +76,21 @@ function run(command, args) {
   if (result.stderr) process.stderr.write(result.stderr);
 }
 
+/*
+ * clang and rustc emit "linker-signed" ad-hoc signatures. Those stop validating
+ * once the binary is copied by a process that carries provenance — Tauri's build
+ * script staging bundle.resources into target/ is exactly that — and macOS then
+ * kills the copy with SIGKILL (Code Signature Invalid) before it prints a line.
+ * The kernel caches that verdict per inode, so clearing the xattr afterwards does
+ * not recover it. Re-signing here produces a genuine ad-hoc signature that
+ * survives every downstream copy.
+ */
+function resignForMacos(file) {
+  if (process.platform !== 'darwin') return;
+  run('xattr', ['-c', file]);
+  run('codesign', ['--force', '--sign', '-', file]);
+}
+
 const helperSource = path.join(
   repositoryRoot,
   'target',
@@ -104,6 +119,7 @@ if (!fs.existsSync(helperSource)) {
 }
 fs.copyFileSync(helperSource, helperDestination);
 if (process.platform !== 'win32') fs.chmodSync(helperDestination, 0o755);
+resignForMacos(helperDestination);
 
 if (targetSettings.hostCompiler) {
   const hostArgs = target.startsWith('x86_64-pc-windows')
@@ -132,10 +148,13 @@ if (targetSettings.hostCompiler) {
   run(targetSettings.hostCompiler, hostArgs);
   fs.rmSync(path.join(payloadRoot, 'graph-host.obj'), { force: true });
   if (process.platform !== 'win32') fs.chmodSync(nativeDestination, 0o755);
-  fs.copyFileSync(nativeDestination, path.join(bridgeRoot, 'build', targetSettings.nativeHost));
+  resignForMacos(nativeDestination);
+  const bridgeBuildHost = path.join(bridgeRoot, 'build', targetSettings.nativeHost);
+  fs.copyFileSync(nativeDestination, bridgeBuildHost);
   if (process.platform !== 'win32') {
-    fs.chmodSync(path.join(bridgeRoot, 'build', targetSettings.nativeHost), 0o755);
+    fs.chmodSync(bridgeBuildHost, 0o755);
   }
+  resignForMacos(bridgeBuildHost);
 }
 
 
@@ -152,6 +171,20 @@ if (nativeDestination && process.platform !== 'win32') {
   const architecture = spawnSync('file', [nativeDestination], { encoding: 'utf8' });
   if (architecture.status !== 0 || !architecture.stdout.toLowerCase().includes(targetSettings.architecture.toLowerCase())) {
     throw new Error(`${nativeDestination} is not a ${targetSettings.architecture} executable`);
+  }
+  // An invalid code signature does not surface until the kernel kills the
+  // process, which the Bridge only sees as "GraphServer exited before ready
+  // (SIGKILL)" long after the payload was staged. Prove the binary can actually
+  // start here, where the cause is still obvious.
+  const usage = spawnSync(nativeDestination, [], { encoding: 'utf8' });
+  if (usage.signal) {
+    throw new Error(
+      `${nativeDestination} was killed by ${usage.signal} on launch; ` +
+      'the code signature is most likely invalid',
+    );
+  }
+  if (!`${usage.stdout}${usage.stderr}`.startsWith('Usage:')) {
+    throw new Error(`${nativeDestination} did not report its usage contract`);
   }
 }
 

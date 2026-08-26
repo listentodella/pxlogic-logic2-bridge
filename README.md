@@ -13,6 +13,12 @@ resources, and exposes a manually entered PXView-compatible hardware voltage
 threshold. Logic 2 remains the source of truth for channels, sample rate,
 capture control, triggers, filters, and analyzers.
 
+A first-run walkthrough explains that split, inline `?` affordances explain the
+hardware terms at the point of use, and an always-on-top status panel reveals
+itself once the Bridge goes live so the data link stays visible while Logic 2
+has focus. See [Bridge guidance and status panel
+behavior](docs/logic2-bridge-guidance.md).
+
 PXLogic FPGA setup is performed once per Bridge launch. Logic 2 Start/Stop
 operations reuse that prepared state, keep PXLogic hardware outputs disabled,
 and only arm or stop the input sampler. The voltage field is a comparator

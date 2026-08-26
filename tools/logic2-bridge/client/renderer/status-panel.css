@@ -11,107 +11,227 @@
 body {
   margin: 0;
   min-width: 300px;
-  min-height: 300px;
   background: #f4f5f7;
 }
 
 button { font: inherit; cursor: pointer; letter-spacing: 0; }
 
+/* The window carries no native decorations: a titlebar would duplicate the two
+   controls below and, on the collapsed chip, dwarf it entirely. The header is
+   therefore both the live readout and the drag handle. */
 .panel-header {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
-  padding: 16px 18px 14px;
+  gap: 10px;
+  padding: 11px 12px 11px 14px;
   color: #fff;
   background: #25272b;
   border-bottom: 1px solid #151619;
 }
 
-.eyebrow {
-  color: #aeb3bb;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 1px;
+.panel-live { min-width: 0; flex: 1 1 auto; }
+
+.live-state { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.live-state strong { flex: 0 0 auto; font-size: 13px; font-weight: 650; }
+.live-state #state-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: #9aa0a8;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-h1 { margin: 4px 0 0; font-size: 17px; font-weight: 650; }
+/* Device identity belongs next to the connection state, not in a section of its
+   own: together they answer "am I connected, and to what". */
+.live-device {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 3px;
+}
+
+.live-device span {
+  min-width: 0;
+  overflow: hidden;
+  color: #8b9098;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-device #device-label { flex: 0 1 auto; color: #c3c8cf; }
+.live-device #device-serial { flex: 1 1 auto; }
+.live-device #device-serial[hidden] { display: none; }
+
+.panel-actions { display: flex; flex: 0 0 auto; gap: 6px; }
 
 .icon-button {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   color: #c8ccd2;
   background: transparent;
   border: 1px solid #555a62;
   border-radius: 4px;
-  font-size: 20px;
-  line-height: 20px;
+  font-size: 16px;
+  line-height: 1;
 }
 
 .icon-button:hover { color: #fff; border-color: #fff; }
-
-main { padding: 14px 16px 12px; }
-
-.hero-status {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 42px;
-  padding: 10px 12px;
-  background: #fff;
-  border: 1px solid #d7dbe0;
-  border-radius: 6px;
-}
+.icon-button:focus-visible { outline: 2px solid #6f97dd; outline-offset: 1px; }
 
 .state-dot { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: #8d929a; }
 .state-dot.running { background: #43aa6c; box-shadow: 0 0 0 4px rgb(67 170 108 / 16%); }
 .state-dot.starting, .state-dot.stopping, .state-dot.recovery { background: #d69d23; }
 .state-dot.error { background: #d24d38; }
 
-.hero-status strong, .hero-status span { display: block; }
-.hero-status strong { font-size: 13px; }
-.hero-status div span { margin-top: 2px; color: #70757e; font-size: 11px; }
+main { padding: 12px 14px 10px; }
+
+/* Shown only the first time the panel reveals itself, so an always-on-top window
+   that appeared on its own is never unexplained. */
+.panel-intro {
+  margin-bottom: 11px;
+  padding: 10px 11px;
+  background: #eef4fd;
+  border: 1px solid #bcd2f0;
+  border-radius: 6px;
+}
+
+.panel-intro[hidden] { display: none; }
+.panel-intro p { margin: 0; color: #2c4a76; font-size: 11px; line-height: 1.6; }
+.panel-intro-actions { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+.panel-intro-actions button {
+  min-height: 26px;
+  padding: 0 10px;
+  color: #1f3f6d;
+  background: #fff;
+  border: 1px solid #a8c3e6;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.panel-intro-actions button:hover { border-color: #5b83bd; }
+.panel-intro-actions .link-button {
+  min-height: 0;
+  padding: 0;
+  color: #4a6ea8;
+  background: transparent;
+  border: 0;
+  font-weight: 500;
+  text-decoration: underline;
+}
 
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1px;
-  margin-top: 12px;
   overflow: hidden;
   background: #d7dbe0;
   border: 1px solid #d7dbe0;
   border-radius: 6px;
 }
 
-.metric { min-width: 0; padding: 10px 11px; background: #fff; }
+.metric { min-width: 0; padding: 8px 10px; background: #fff; }
 .metric span, .metric strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.metric span { margin-bottom: 4px; color: #7a7f87; font-size: 10px; }
+.metric span { margin-bottom: 3px; color: #7a7f87; font-size: 10px; }
 .metric strong { color: #30343a; font-size: 12px; font-weight: 650; }
 
-.quality-section, .device-section {
-  margin-top: 12px;
-  padding: 11px 12px;
+/* A metric label that carries a `?` affordance keeps the ellipsis on the text
+   itself so the button is never clipped by the narrow panel. */
+.metric span.label-with-hint { display: flex; align-items: center; gap: 4px; overflow: visible; }
+.metric-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Two tight lines rather than a section of its own: verdict on the right of the
+   label, then the bar and the counts sharing one row. */
+.quality-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px 9px;
+  margin-top: 10px;
+  padding: 9px 11px;
   background: #fff;
   border: 1px solid #d7dbe0;
   border-radius: 6px;
 }
 
-.quality-heading { display: flex; justify-content: space-between; color: #666c75; font-size: 11px; }
-.quality-heading strong { color: #276b44; font-weight: 650; }
-.quality-heading strong.warn { color: #805c12; }
-.quality-heading strong.error { color: #a03b2d; }
-.quality-bar { height: 4px; margin-top: 9px; overflow: hidden; background: #e5e7ea; border-radius: 4px; }
+.quality-row > .label-with-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #666c75;
+  font-size: 11px;
+}
+
+.quality-row #quality-label { justify-self: end; font-size: 11px; font-weight: 650; color: #276b44; }
+.quality-row #quality-label.warn { color: #805c12; }
+.quality-row #quality-label.error { color: #a03b2d; }
+
+.quality-bar {
+  align-self: center;
+  width: 74px;
+  height: 4px;
+  overflow: hidden;
+  background: #e5e7ea;
+  border-radius: 4px;
+}
+
 .quality-bar span { display: block; width: 100%; height: 100%; background: #43aa6c; transition: width 180ms ease, background 180ms ease; }
 .quality-bar span.warn { width: 55%; background: #d69d23; }
 .quality-bar span.error { width: 18%; background: #d24d38; }
-.quality-section p { margin: 8px 0 0; color: #777d86; font-size: 10px; line-height: 1.4; }
 
-.device-section span, .device-section strong, .device-section small { display: block; }
-.device-section span { color: #7a7f87; font-size: 10px; }
-.device-section strong { margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.device-section small { margin-top: 3px; color: #858a92; font-size: 10px; }
+.quality-row #quality-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: #777d86;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
-footer { display: flex; align-items: center; gap: 10px; padding: 0 16px 14px; }
-footer button { min-height: 29px; padding: 0 11px; color: #3f444b; background: #fff; border: 1px solid #c8cdd4; border-radius: 4px; font-size: 11px; }
+footer { display: flex; align-items: center; gap: 10px; padding: 0 14px 12px; }
+footer button { min-height: 28px; padding: 0 11px; color: #3f444b; background: #fff; border: 1px solid #c8cdd4; border-radius: 4px; font-size: 11px; }
 footer button:hover { border-color: #777e87; }
 footer span { margin-left: auto; overflow: hidden; color: #858a92; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Collapsed shape: the whole window is one button. A small icon inside a bar was
+   the previous design and it was too fiddly to hit, which defeated the point of
+   collapsing at all. The chip is pinned to the viewport rather than sized in
+   percentages, because a percentage height resolves against an auto-height body
+   and would leave the window background showing. */
+.panel-chip {
+  display: none;
+  align-items: center;
+  gap: 9px;
+  padding: 0 14px;
+  color: #fff;
+  background: #25272b;
+  border: 1px solid #3a3d43;
+  border-radius: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.panel-chip:hover { background: #31343a; border-color: #5a5e66; }
+.panel-chip:active { background: #1e2023; }
+.panel-chip:focus-visible { outline: 2px solid #6f97dd; outline-offset: -3px; }
+
+#chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+body.collapsed {
+  min-width: 168px;
+  min-height: 44px;
+  overflow: hidden;
+  background: #25272b;
+}
+
+body.collapsed .panel-header,
+body.collapsed main,
+body.collapsed footer { display: none; }
+
+body.collapsed .panel-chip {
+  position: fixed;
+  display: flex;
+  inset: 0;
+}

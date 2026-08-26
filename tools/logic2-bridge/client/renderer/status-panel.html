@@ -6,47 +6,66 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
     <title>PXLogic 状态</title>
     <link rel="stylesheet" href="status-panel.css">
+    <link rel="stylesheet" href="hints.css">
   </head>
   <body>
+    <button id="panel-chip" class="panel-chip" type="button" title="展开 PXLogic 状态面板">
+      <span id="chip-dot" class="state-dot"></span>
+      <span id="chip-label">待机</span>
+    </button>
+
     <header class="panel-header">
-      <div>
-        <div class="eyebrow">PXLOGIC BRIDGE</div>
-        <h1>采集状态</h1>
+      <div class="panel-live">
+        <div class="live-state">
+          <span id="state-dot" class="state-dot"></span>
+          <strong id="state-label">待机</strong>
+          <span id="state-detail">等待 Logic 2 启动</span>
+        </div>
+        <div class="live-device">
+          <span id="device-label">PXLogic</span>
+          <span id="device-serial" hidden></span>
+        </div>
       </div>
-      <button id="hide-button" class="icon-button" type="button" title="隐藏状态面板" aria-label="隐藏状态面板">×</button>
+      <div class="panel-actions">
+        <button id="collapse-button" class="icon-button" type="button"
+          title="收起为悬浮按钮" aria-label="收起为悬浮按钮">–</button>
+        <button id="hide-button" class="icon-button" type="button"
+          title="隐藏状态面板" aria-label="隐藏状态面板">×</button>
+      </div>
     </header>
 
     <main>
-      <section class="hero-status">
-        <span id="state-dot" class="state-dot"></span>
-        <div>
-          <strong id="state-label">待机</strong>
-          <span id="state-detail">等待 Logic 2 启动</span>
+      <section id="panel-intro" class="panel-intro" hidden>
+        <p>这个面板会一直浮在最上层，方便你在 Logic 2 里采集时监看数据链路。拖动标题区可移动，靠近屏幕边缘会自动贴边。点右上角的 – 可收起成一个悬浮按钮，再点那个按钮就展开回来。</p>
+        <div class="panel-intro-actions">
+          <button id="panel-intro-dismiss" type="button">明白了</button>
+          <button id="panel-intro-disable" class="link-button" type="button">不要自动显示</button>
         </div>
       </section>
 
       <section class="metric-grid" aria-live="polite">
         <div class="metric"><span>实际通道</span><strong id="channels">--</strong></div>
-        <div class="metric"><span>Logic 采样率</span><strong id="logic-rate">--</strong></div>
-        <div class="metric"><span>硬件有效率</span><strong id="effective-rate">--</strong></div>
-        <div class="metric"><span>PXView 模式</span><strong id="stream-mode">--</strong></div>
-        <div class="metric"><span>硬件阈值</span><strong id="threshold">--</strong></div>
+        <div class="metric"><span class="label-with-hint"><span class="metric-text">Logic 采样率</span><button
+          class="hint-button" type="button" data-hint="logic-sample-rate"
+          aria-label="关于 Logic 采样率">?</button></span><strong id="logic-rate">--</strong></div>
+        <div class="metric"><span class="label-with-hint"><span class="metric-text">硬件有效率</span><button
+          class="hint-button" type="button" data-hint="effective-sample-rate"
+          aria-label="关于硬件有效率">?</button></span><strong id="effective-rate">--</strong></div>
+        <div class="metric"><span class="label-with-hint"><span class="metric-text">PXView 模式</span><button
+          class="hint-button" type="button" data-hint="pxview-mode"
+          aria-label="关于 PXView 模式">?</button></span><strong id="stream-mode">--</strong></div>
+        <div class="metric"><span class="label-with-hint"><span class="metric-text">硬件阈值</span><button
+          class="hint-button" type="button" data-hint="threshold"
+          aria-label="关于电压判断阈值">?</button></span><strong id="threshold">--</strong></div>
         <div class="metric"><span>USB 链路</span><strong id="usb-speed">--</strong></div>
       </section>
 
-      <section class="quality-section">
-        <div class="quality-heading">
-          <span>数据链路</span>
-          <strong id="quality-label">待统计</strong>
-        </div>
+      <section class="quality-row">
+        <span class="label-with-hint">数据链路<button class="hint-button" type="button"
+          data-hint="data-loss" aria-label="关于下溢与丢弃">?</button></span>
+        <strong id="quality-label">待统计</strong>
         <div class="quality-bar"><span id="quality-fill"></span></div>
-        <p id="quality-detail">开始采集后显示注入、下溢和丢弃统计</p>
-      </section>
-
-      <section class="device-section">
-        <span>设备</span>
-        <strong id="device-label">PXLogic</strong>
-        <small id="device-serial">序列号 --</small>
+        <span id="quality-detail">开始采集后显示注入、下溢和丢弃统计</span>
       </section>
     </main>
 
@@ -54,6 +73,7 @@
       <button id="main-button" type="button">打开 Bridge</button>
       <span id="endpoint">WebSocket --</span>
     </footer>
+    <script src="hints.js"></script>
     <script src="status-panel.js"></script>
   </body>
 </html>

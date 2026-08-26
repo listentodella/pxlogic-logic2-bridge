@@ -2260,7 +2260,7 @@ dependencies = [
 
 [[package]]
 name = "pxlogic-logic2-bridge-client"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "libc",
  "plist",

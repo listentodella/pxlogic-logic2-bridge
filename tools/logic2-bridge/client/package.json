@@ -1,6 +1,6 @@
 {
   "name": "pxlogic-logic2-bridge-client",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Desktop launcher for the PXLogic Logic 2 live bridge",
   "author": "PXLogic Project",
   "main": "main.cjs",

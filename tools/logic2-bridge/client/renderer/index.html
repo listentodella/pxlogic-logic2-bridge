@@ -6,6 +6,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
     <title>PXLogic Bridge</title>
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="hints.css">
   </head>
   <body>
     <header class="app-header">
@@ -14,6 +15,7 @@
         <h1>PXLogic Bridge</h1>
         <p>Logic 2 Live Capture</p>
       </div>
+      <button id="onboarding-button" class="header-button" type="button">使用引导</button>
       <button id="status-panel-button" class="header-button" type="button" hidden>
         显示状态面板
       </button>
@@ -24,7 +26,7 @@
     </header>
 
     <main>
-      <section class="settings-section">
+      <section class="settings-section" id="logic-section">
         <div class="section-heading">
           <div>
             <h2>Logic 2</h2>
@@ -45,14 +47,15 @@
         <div class="validation-row">
           <span>版本</span>
           <strong id="logic-version">--</strong>
-          <span>GraphServer</span>
+          <span class="label-with-hint">GraphServer<button class="hint-button" type="button"
+            data-hint="graphserver-identity" aria-label="关于 GraphServer 与会话设备">?</button></span>
           <strong id="graph-fingerprint">--</strong>
           <span id="logic-compatibility" class="compatibility">未检测</span>
         </div>
         <p id="compatibility-detail" class="compatibility-detail">等待检查正式支持状态</p>
       </section>
 
-      <section class="settings-section hardware-section">
+      <section class="settings-section hardware-section" id="pxlogic-section">
         <div class="section-heading">
           <div>
             <h2>PXLogic 硬件</h2>
@@ -67,12 +70,16 @@
             <select id="pxlogic-device"></select>
           </div>
           <div>
-            <label for="pxlogic-threshold">电压判断阈值（V）</label>
+            <label for="pxlogic-threshold" class="label-with-hint">电压判断阈值（V）<button
+              class="hint-button" type="button" data-hint="threshold"
+              aria-label="关于电压判断阈值">?</button></label>
             <input id="pxlogic-threshold" type="number" min="0" max="6.668" step="0.01"
               inputmode="decimal" value="1.80">
           </div>
           <div>
-            <label for="threshold-reference">参考起点</label>
+            <label for="threshold-reference" class="label-with-hint">参考起点<button
+              class="hint-button" type="button" data-hint="threshold-reference"
+              aria-label="关于参考起点">?</button></label>
             <select id="threshold-reference">
               <option value="custom">自定义</option>
               <option value="logic-1.8" data-volts="0.9">1.8 V 电平中点 · 0.9 V</option>
@@ -83,7 +90,9 @@
             </select>
           </div>
           <div>
-            <label for="pxlogic-firmware-version">MCU 固件版本</label>
+            <label for="pxlogic-firmware-version" class="label-with-hint">MCU 固件版本<button
+              class="hint-button" type="button" data-hint="firmware-version"
+              aria-label="关于 MCU 固件版本">?</button></label>
             <select id="pxlogic-firmware-version"></select>
           </div>
         </div>
@@ -116,18 +125,18 @@
         </div>
 
         <div class="readiness-grid" aria-live="polite">
-          <div>
+          <button class="readiness-item" type="button" data-focus="logic-path">
             <span>Logic 2 支持级别</span>
             <strong id="logic-readiness" class="readiness-value">待检测</strong>
-          </div>
-          <div>
+          </button>
+          <button class="readiness-item" type="button" data-focus="pxlogic-device">
             <span>PXLogic 设备</span>
             <strong id="hardware-readiness" class="readiness-value">待检测</strong>
-          </div>
-          <div>
+          </button>
+          <button class="readiness-item" type="button" data-focus="pxlogic-threshold">
             <span>硬件阈值</span>
             <strong id="threshold-readiness" class="readiness-value">待检查</strong>
-          </div>
+          </button>
         </div>
         <div id="session-source" class="session-source">
           <span>Logic 2 会话设备</span>
@@ -180,16 +189,19 @@
         </div>
         <div class="telemetry-grid" aria-live="polite">
           <div><span>状态</span><strong id="capture-status">未采集</strong></div>
-          <div><span>实际采样率</span><strong id="capture-rate">--</strong></div>
+          <div><span class="label-with-hint">实际采样率<button class="hint-button" type="button"
+            data-hint="effective-sample-rate" aria-label="关于硬件有效率">?</button></span><strong id="capture-rate">--</strong></div>
           <div><span>启用通道</span><strong id="capture-channels">--</strong></div>
           <div><span>比较阈值</span><strong id="capture-threshold">--</strong></div>
           <div><span>已转换</span><strong id="capture-converted">--</strong></div>
           <div><span>已注入</span><strong id="capture-injected">--</strong></div>
           <div><span>注入队列</span><strong id="capture-queued">--</strong></div>
-          <div><span>丢弃 / 下溢</span><strong id="capture-loss">待统计</strong></div>
+          <div><span class="label-with-hint">丢弃 / 下溢<button class="hint-button" type="button"
+            data-hint="data-loss" aria-label="关于下溢与丢弃">?</button></span><strong id="capture-loss">待统计</strong></div>
         </div>
         <p class="telemetry-detail">Logic 2 触发设置：<strong id="capture-trigger">--</strong></p>
-        <p class="telemetry-detail">PXView 配置映射：<strong id="capture-mapping">等待采集设置</strong></p>
+        <p class="telemetry-detail">PXView 配置映射：<strong id="capture-mapping">等待采集设置</strong><button
+          class="hint-button" type="button" data-hint="pxview-mode" aria-label="关于 PXView 模式">?</button></p>
       </section>
 
       <section class="activity-section">
@@ -258,6 +270,94 @@
       </div>
     </dialog>
 
+    <dialog id="onboarding-wizard" class="wizard-dialog">
+      <p class="wizard-progress">第 <strong id="wizard-step-index">1</strong> / 4 步</p>
+
+      <section class="wizard-step" data-step="1">
+        <h2>Logic 2 与 Bridge 各管什么</h2>
+        <p>
+          Bridge 把 PXLogic 伪装成 Logic Pro 16，再把采到的数据实时注入未经修改的
+          Logic 2。两边分工是固定的，弄清这一点后面的设置就都好理解了。
+        </p>
+        <dl class="wizard-split">
+          <dt>Logic 2 决定</dt>
+          <dd>启用哪些通道、采样率、触发条件、滤波、协议解码器，以及开始与停止</dd>
+          <dt>Bridge 决定</dt>
+          <dd>用哪台 PXLogic、MCU 固件版本、硬件电压判断阈值</dd>
+        </dl>
+        <p class="wizard-note">
+          因此在 Logic 2 里看到的会话设备名会是 Demo Logic Pro 16，那是 Bridge 的伪装；
+          真实数据来自你的 PXLogic。
+        </p>
+      </section>
+
+      <section class="wizard-step" data-step="2" hidden>
+        <h2>选择 Logic 2 安装</h2>
+        <p>
+          Bridge 需要一份官方 Logic 2，并且会离线判断它的 GraphServer 能否安全注入。
+          正式支持可直接使用；实验验证可用但需你承担风险；不可用则必须换一个安装。
+        </p>
+        <div class="wizard-readout">
+          <span>当前选择</span>
+          <strong id="wizard-logic-path">尚未检测</strong>
+          <span>兼容性</span>
+          <strong id="wizard-logic-verdict">待检测</strong>
+        </div>
+        <button class="secondary-button wizard-jump" type="button" data-focus="logic-path">
+          去选择 Logic 2
+        </button>
+      </section>
+
+      <section class="wizard-step" data-step="3" hidden>
+        <h2>确认设备与固件</h2>
+        <p>
+          Bridge 随包携带 PXView 1.4.5 起的四个 MCU 固件镜像，默认始终是最新那个，
+          不需要改动。只有在需要复现旧版本行为时才切换。
+        </p>
+        <div class="wizard-readout">
+          <span>检测到的设备</span>
+          <strong id="wizard-device">尚未检测</strong>
+          <span>MCU 固件</span>
+          <strong id="wizard-firmware">--</strong>
+        </div>
+        <p class="wizard-note">
+          切换到较旧的固件会在下次启动时改写设备的 MCU 闪存并让它重新枚举，
+          这个操作无法从 Bridge 内部撤销，所以降级需要单独确认。
+        </p>
+        <button class="secondary-button wizard-jump" type="button" data-focus="pxlogic-device">
+          去确认设备与固件
+        </button>
+      </section>
+
+      <section class="wizard-step" data-step="4" hidden>
+        <h2>设置电压判断阈值</h2>
+        <p>
+          这是 PXLogic 硬件比较器的判定电平，高于它记为 1，低于记为 0。它必须按实际探头、
+          目标和信号质量来选，仅凭目标的标称逻辑电平推不出可靠阈值。
+        </p>
+        <div class="wizard-readout">
+          <span>当前阈值</span>
+          <strong id="wizard-threshold">--</strong>
+          <span>验证状态</span>
+          <strong id="wizard-threshold-verified">未验证</strong>
+        </div>
+        <p class="wizard-note">
+          「参考起点」下拉里的每一项只是常见电平的中点，是起点不是答案。设定后请用已知协议的
+          解码结果验证一次再勾选「已用已知协议结果验证当前阈值」——能看到边沿不等于采到的数据正确。
+        </p>
+        <button class="secondary-button wizard-jump" type="button" data-focus="pxlogic-threshold">
+          去设置阈值
+        </button>
+      </section>
+
+      <div class="wizard-actions">
+        <button id="wizard-skip" class="quiet-button" type="button">跳过</button>
+        <button id="wizard-back" class="secondary-button" type="button" disabled>上一步</button>
+        <button id="wizard-next" class="primary-button" type="button">下一步</button>
+      </div>
+    </dialog>
+
+    <script src="hints.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

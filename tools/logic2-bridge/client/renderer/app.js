@@ -22,6 +22,7 @@ function createTauriApi() {
     showStatusPanel: () => invoke('status_panel_show'),
     hideStatusPanel: () => invoke('status_panel_hide'),
     toggleStatusPanel: () => invoke('status_panel_toggle'),
+    completeOnboarding: () => invoke('onboarding_complete'),
     onState: callback => void listen('bridge-state', event => callback(event.payload)),
     onTelemetry: callback => void listen('capture-telemetry', event => callback(event.payload)),
     onLog: callback => void listen('bridge-log', event => callback(event.payload)),
@@ -104,6 +105,20 @@ const elements = {
   footerMessage: document.querySelector('#footer-message'),
   startButton: document.querySelector('#start-button'),
   statusPanelButton: document.querySelector('#status-panel-button'),
+  onboardingButton: document.querySelector('#onboarding-button'),
+  wizard: document.querySelector('#onboarding-wizard'),
+  wizardStepIndex: document.querySelector('#wizard-step-index'),
+  wizardSteps: Array.from(document.querySelectorAll('.wizard-step')),
+  wizardSkip: document.querySelector('#wizard-skip'),
+  wizardBack: document.querySelector('#wizard-back'),
+  wizardNext: document.querySelector('#wizard-next'),
+  wizardLogicPath: document.querySelector('#wizard-logic-path'),
+  wizardLogicVerdict: document.querySelector('#wizard-logic-verdict'),
+  wizardDevice: document.querySelector('#wizard-device'),
+  wizardFirmware: document.querySelector('#wizard-firmware'),
+  wizardThreshold: document.querySelector('#wizard-threshold'),
+  wizardThresholdVerified: document.querySelector('#wizard-threshold-verified'),
+  readinessItems: Array.from(document.querySelectorAll('.readiness-item')),
 };
 
 let portMode = 'auto';
@@ -117,6 +132,79 @@ let logicAnalyzing = false;
 let inspectionSequence = 0;
 const warnedCompatibilityFingerprints = new Set();
 let experimentalConfirmationToken = null;
+let wizardStep = 1;
+
+/// Scrolls the control that resolves a readiness item into view and flashes its
+/// section, so a guidance affordance always lands somewhere actionable.
+function focusSetting(targetId) {
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  const section = target.closest('.settings-section');
+  (section || target).scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (section) {
+    section.classList.remove('section-highlight');
+    // Reading a layout property restarts the animation when the same section is
+    // requested twice in a row.
+    void section.offsetWidth;
+    section.classList.add('section-highlight');
+    setTimeout(() => section.classList.remove('section-highlight'), 1600);
+  }
+  target.focus({ preventScroll: true });
+}
+
+function renderWizardStep() {
+  const total = elements.wizardSteps.length;
+  wizardStep = Math.min(Math.max(wizardStep, 1), total);
+  for (const step of elements.wizardSteps) {
+    step.hidden = Number(step.dataset.step) !== wizardStep;
+  }
+  elements.wizardStepIndex.textContent = String(wizardStep);
+  elements.wizardBack.disabled = wizardStep === 1;
+  elements.wizardNext.textContent = wizardStep === total ? '开始使用' : '下一步';
+}
+
+// The wizard never duplicates a control; it reads the same live values the
+// settings sections render so the two can never disagree.
+function renderWizardReadouts() {
+  elements.wizardLogicPath.textContent = elements.logicPath.value.trim() || '尚未选择';
+  elements.wizardLogicPath.title = elements.wizardLogicPath.textContent;
+  elements.wizardLogicVerdict.textContent = elements.compatibility.textContent || '待检测';
+  elements.wizardDevice.textContent = selectedHardwareDevice()
+    ? selectedHardwareLabel()
+    : '未检测到 PXLogic';
+  elements.wizardDevice.title = elements.wizardDevice.textContent;
+  const release = findFirmwareRelease(elements.pxlogicFirmwareVersion.value);
+  elements.wizardFirmware.textContent = release
+    ? `${release.label} · ${release.firmwareVersion}${release.latest ? '（最新）' : ''}`
+    : '--';
+  const threshold = Number(elements.pxlogicThreshold.value);
+  elements.wizardThreshold.textContent = Number.isFinite(threshold)
+    ? `${threshold.toFixed(3)} V`
+    : '--';
+  elements.wizardThresholdVerified.textContent = elements.thresholdVerified.checked
+    ? '已用已知协议验证'
+    : '尚未验证';
+}
+
+function openWizard(step = 1) {
+  wizardStep = step;
+  renderWizardStep();
+  renderWizardReadouts();
+  if (!elements.wizard.open) elements.wizard.showModal();
+}
+
+async function recordOnboardingComplete() {
+  if (typeof api.completeOnboarding !== 'function') return;
+  try {
+    await api.completeOnboarding();
+  } catch (error) {
+    appendLog(`[client] 无法记录引导状态：${errorMessage(error)}`);
+  }
+}
+
+function finishWizard() {
+  if (elements.wizard.open) elements.wizard.close();
+}
 
 function isActive() {
   return ['starting', 'running', 'stopping', 'recovery'].includes(currentState.phase);
@@ -979,6 +1067,35 @@ elements.statusPanelButton.addEventListener('click', async () => {
     appendLog(`[client] 无法切换状态面板：${errorMessage(error)}`);
   }
 });
+
+elements.onboardingButton.addEventListener('click', () => openWizard(1));
+// Escape closes a <dialog> natively, bypassing every button. Recording on close
+// instead of per-button is the only way the walkthrough cannot silently reappear
+// on the next launch after the user dismissed it.
+elements.wizard.addEventListener('close', () => void recordOnboardingComplete());
+elements.wizardBack.addEventListener('click', () => {
+  wizardStep -= 1;
+  renderWizardStep();
+});
+elements.wizardNext.addEventListener('click', () => {
+  if (wizardStep >= elements.wizardSteps.length) {
+    finishWizard();
+    return;
+  }
+  wizardStep += 1;
+  renderWizardStep();
+  renderWizardReadouts();
+});
+// Skipping still counts as answered: re-opening the walkthrough uninvited is
+// worse than trusting the user, and the header button brings it back.
+elements.wizardSkip.addEventListener('click', () => finishWizard());
+
+for (const item of [...elements.readinessItems, ...document.querySelectorAll('.wizard-jump')]) {
+  item.addEventListener('click', () => {
+    if (elements.wizard.open) elements.wizard.close();
+    focusSetting(item.dataset.focus);
+  });
+}
 elements.experimentalConfirmationCheckbox.addEventListener('change', () => {
   elements.continueExperimentalButton.disabled = !elements.experimentalConfirmationCheckbox.checked;
 });elements.cancelExperimentalButton.addEventListener('click', () => {
@@ -1070,6 +1187,20 @@ async function initialize() {
   const selected = initial.applications.find(item => item.path === initial.settings.logicAppPath);
   renderInspection(selected || await api.inspectLogicApp(initial.settings.logicAppPath));
   renderState(initial.bridgeState);
+  maybeOpenWizard(initial.settings);
+}
+
+// Absent `guidance` means a host that does not persist walkthrough progress —
+// the legacy Electron launcher — so the wizard stays out of its way entirely
+// rather than reappearing on every launch.
+function maybeOpenWizard(settings) {
+  const guidance = settings?.guidance;
+  if (!guidance || typeof api.completeOnboarding !== 'function') {
+    elements.onboardingButton.hidden = true;
+    return;
+  }
+  if (Number(guidance.onboardingCompletedVersion || 0) > 0) return;
+  openWizard(1);
 }
 
 initialize().catch(error => {

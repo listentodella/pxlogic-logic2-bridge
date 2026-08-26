@@ -128,6 +128,125 @@ footer p {
   margin-left: 0;
 }
 
+.header-button + .header-button {
+  margin-left: 0;
+}
+
+/* First-run walkthrough. Every step reads live values and hands the user to the
+   real control rather than duplicating it, so the wizard can never disagree with
+   the settings it describes. */
+.wizard-dialog {
+  width: min(560px, calc(100vw - 48px));
+  padding: 24px;
+  color: #202124;
+  background: #ffffff;
+  border: 1px solid #c9ccd2;
+  border-radius: 6px;
+  box-shadow: 0 16px 42px rgb(20 22 26 / 24%);
+}
+
+.wizard-dialog::backdrop {
+  background: rgb(20 22 26 / 42%);
+}
+
+.wizard-progress {
+  margin: 0 0 4px;
+  color: #7a7f87;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+}
+
+.wizard-progress strong {
+  color: #33363b;
+}
+
+.wizard-step h2 {
+  margin: 0;
+  color: #202124;
+  font-size: 16px;
+}
+
+.wizard-step p {
+  margin: 12px 0 0;
+  color: #565b63;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.wizard-step[hidden] {
+  display: none;
+}
+
+.wizard-note {
+  padding: 9px 11px;
+  background: #f6f7f9;
+  border-left: 2px solid #c3c8d0;
+  border-radius: 0 4px 4px 0;
+}
+
+.wizard-split {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 14px 0 0;
+}
+
+.wizard-split dt {
+  color: #33363b;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.wizard-split dd {
+  margin: 0;
+  color: #565b63;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.wizard-readout {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 14px;
+  margin-top: 14px;
+  padding: 11px 13px;
+  background: #f6f7f9;
+  border: 1px solid #dfe2e6;
+  border-radius: 5px;
+}
+
+.wizard-readout span {
+  color: #7a7f87;
+  font-size: 11px;
+}
+
+.wizard-readout strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #33363b;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wizard-jump {
+  margin-top: 14px;
+}
+
+.wizard-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.wizard-actions #wizard-back {
+  margin-left: auto;
+}
+
 .status-dot {
   width: 7px;
   height: 7px;
@@ -199,6 +318,25 @@ label {
   color: #565b63;
   font-size: 12px;
   font-weight: 600;
+}
+
+/* Hosts a `?` affordance next to a label. The display override is repeated per
+   container because the grid rules below force `display: block` on their own
+   spans and would otherwise win on specificity. */
+.label-with-hint {
+  align-items: center;
+  gap: 5px;
+}
+
+label.label-with-hint,
+.validation-row span.label-with-hint,
+.telemetry-grid span.label-with-hint {
+  display: inline-flex;
+}
+
+.telemetry-detail .hint-button {
+  margin-left: 6px;
+  vertical-align: middle;
 }
 
 .path-row {
@@ -434,22 +572,57 @@ select:focus {
   gap: 18px;
 }
 
-.readiness-grid > div {
+.readiness-grid > div,
+.readiness-item {
   min-width: 0;
   padding-right: 18px;
   border-right: 1px solid #d7d9de;
 }
 
-.readiness-grid > div:last-child {
+.readiness-grid > div:last-child,
+.readiness-item:last-child {
   padding-right: 0;
   border-right: 0;
+}
+
+/* The readiness cells are the spine of the guidance: clicking one takes the user
+   to the control that resolves it. */
+.readiness-item {
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-left: 0;
+  color: inherit;
+  background: transparent;
+  border-top: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: 0;
+  font: inherit;
+  text-align: left;
+}
+
+.readiness-item:hover .readiness-value {
+  text-decoration: underline;
+}
+
+.readiness-item:focus-visible {
+  outline: 2px solid #3d6fd6;
+  outline-offset: 2px;
+}
+
+@keyframes section-highlight-fade {
+  from { background: #e8f0fb; }
+  to { background: transparent; }
+}
+
+.section-highlight {
+  animation: section-highlight-fade 1600ms ease-out;
 }
 
 .readiness-grid span,
 .readiness-grid strong {
   display: block;
 }
-
 .readiness-grid span {
   margin-bottom: 5px;
   color: #7a7f87;

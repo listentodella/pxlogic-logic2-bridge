@@ -1,0 +1,68 @@
+/* Shared `?` affordance and hint bubble for both Bridge windows. Layout that is
+   specific to a host surface (metric grids, form labels) stays in that
+   window's stylesheet; this file only owns the button and the bubble. */
+
+.hint-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  color: #6b7079;
+  background: #e8eaed;
+  border: 1px solid #cdd1d7;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.hint-button:hover {
+  color: #202124;
+  background: #dcdfe4;
+  border-color: #a9aeb6;
+}
+
+.hint-button:focus-visible {
+  outline: 2px solid #3d6fd6;
+  outline-offset: 1px;
+}
+
+.hint-button[aria-expanded='true'] {
+  color: #ffffff;
+  background: #4a4f57;
+  border-color: #4a4f57;
+}
+
+.hint-popover {
+  position: fixed;
+  z-index: 40;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 10px 12px;
+  color: #202124;
+  background: #ffffff;
+  border: 1px solid #c2c7ce;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgb(20 22 26 / 18%);
+}
+
+.hint-popover[hidden] {
+  display: none;
+}
+
+.hint-title {
+  display: block;
+  color: #202124;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.hint-body {
+  margin: 6px 0 0;
+  color: #565b63;
+  font-size: 11px;
+  line-height: 1.6;
+}

@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Mutex,
     },
     thread,
@@ -50,10 +50,66 @@ struct ClientSettings {
     /// is always the newest firmware.
     #[serde(default = "default_pxlogic_firmware_id")]
     pxlogic_firmware_id: String,
+    #[serde(default)]
+    guidance: GuidanceSettings,
+    #[serde(default)]
+    status_panel: StatusPanelSettings,
     // This one-shot UI authorization is bound to the inspected GraphServer
     // fingerprint and must never be persisted with the user's settings.
     #[serde(default, skip_serializing)]
     pending_profile_fingerprint: Option<String>,
+}
+
+/// Bump to replay the first-run walkthrough once after a major UI change. A
+/// plain boolean would make that impossible without resetting other settings.
+const ONBOARDING_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuidanceSettings {
+    /// 0 means the walkthrough has never been completed.
+    #[serde(default)]
+    onboarding_completed_version: u32,
+    /// The always-on-top panel introduces itself the first time it appears on
+    /// its own, so an automatic reveal never looks like an unexplained popup.
+    #[serde(default)]
+    status_panel_intro_seen: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PanelPosition {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusPanelSettings {
+    /// Physical pixels in virtual-desktop space. `None` places the panel at the
+    /// primary work area's top-right corner rather than wherever the OS decides,
+    /// which is the difference between a usable monitor and one hidden behind
+    /// the Logic 2 window.
+    #[serde(default)]
+    position: Option<PanelPosition>,
+    #[serde(default)]
+    collapsed: bool,
+    #[serde(default = "default_status_panel_auto_show")]
+    auto_show: bool,
+}
+
+fn default_status_panel_auto_show() -> bool {
+    true
+}
+
+impl Default for StatusPanelSettings {
+    fn default() -> Self {
+        Self {
+            position: None,
+            collapsed: false,
+            auto_show: default_status_panel_auto_show(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -87,6 +143,8 @@ impl Default for ClientSettings {
             temporary_comparator_threshold_volts: None,
             pxlogic_threshold_profiles: BTreeMap::new(),
             pxlogic_firmware_id: default_pxlogic_firmware_id(),
+            guidance: GuidanceSettings::default(),
+            status_panel: StatusPanelSettings::default(),
             pending_profile_fingerprint: None,
         }
     }
@@ -120,6 +178,10 @@ impl ClientSettings {
         self.pxlogic_firmware_id = self.pxlogic_firmware_id.trim().to_string();
         if find_mcu_firmware_release(&self.pxlogic_firmware_id).is_none() {
             self.pxlogic_firmware_id = default_pxlogic_firmware_id();
+        }
+        // A future build must never be treated as already onboarded.
+        if self.guidance.onboarding_completed_version > ONBOARDING_VERSION {
+            self.guidance.onboarding_completed_version = ONBOARDING_VERSION;
         }
         self
     }
@@ -505,6 +567,11 @@ struct AppState {
     previous_session_logs: Mutex<Vec<String>>,
     next_token: AtomicU64,
     quitting: AtomicBool,
+    /// Generation guard for the debounced status-panel move handler.
+    panel_move_generation: AtomicU64,
+    /// Logical width of the expanded panel, remembered across a collapse so the
+    /// chosen width survives the round trip. 0 means never measured.
+    expanded_panel_width: AtomicU32,
 }
 
 impl Default for AppState {
@@ -518,6 +585,8 @@ impl Default for AppState {
             previous_session_logs: Mutex::new(Vec::new()),
             next_token: AtomicU64::new(1),
             quitting: AtomicBool::new(false),
+            panel_move_generation: AtomicU64::new(0),
+            expanded_panel_width: AtomicU32::new(0),
         }
     }
 }
@@ -2084,7 +2153,39 @@ fn update_bridge_state(app: &AppHandle, next: BridgeState) {
     if let Ok(mut current) = app.state::<AppState>().bridge_state.lock() {
         *current = next.clone();
     }
+    let phase = next.phase.clone();
     let _ = app.emit("bridge-state", next);
+    maybe_auto_show_status_panel(app, &phase);
+}
+
+/// The panel is worth revealing exactly once per run: when the Bridge is live
+/// and the user is about to lose sight of the main window behind Logic 2.
+fn should_auto_show_status_panel(phase: &str, auto_show: bool, visible: bool) -> bool {
+    phase == "running" && auto_show && !visible
+}
+
+fn maybe_auto_show_status_panel(app: &AppHandle, phase: &str) {
+    // Cheap guard first: this runs on every state change, while the rest reads
+    // the config file and hops to the main thread.
+    if phase != "running" {
+        return;
+    }
+    let auto_show = load_settings(app).status_panel.auto_show;
+    let phase = phase.to_string();
+    let app = app.clone();
+    let dispatch = app.clone();
+    // update_bridge_state runs on the Bridge stdout reader thread, and window
+    // geometry must be touched on the main thread.
+    let _ = dispatch.run_on_main_thread(move || {
+        let Some(window) = app.get_webview_window("status") else {
+            return;
+        };
+        let visible = window.is_visible().unwrap_or(false);
+        if !should_auto_show_status_panel(&phase, auto_show, visible) {
+            return;
+        }
+        show_status_panel_without_activating(&app);
+    });
 }
 
 fn parse_bridge_runtime_event(line: &str) -> Option<BridgeRuntimeEvent> {
@@ -2584,6 +2685,330 @@ fn request_stop(app: &AppHandle) -> Result<BridgeState, String> {
     Ok(next)
 }
 
+/// Inset used when the panel has no remembered position, and the distance at
+/// which a dragged panel snaps to a work-area edge.
+const STATUS_PANEL_EDGE_MARGIN: i32 = 24;
+const STATUS_PANEL_SNAP_THRESHOLD: i32 = 16;
+/// How much of the panel must stay on some work area for a remembered position
+/// to be considered reachable.
+const STATUS_PANEL_MIN_VISIBLE: i32 = 32;
+/// How long the panel must hold still before a drag is treated as finished.
+const STATUS_PANEL_SETTLE_MS: u64 = 150;
+/// Logical inner sizes for the two panel shapes. The window config floor is the
+/// collapsed size, so the expanded minimum has to be re-applied in code whenever
+/// the panel expands.
+const STATUS_PANEL_MIN_WIDTH: f64 = 300.0;
+const STATUS_PANEL_COLLAPSED_WIDTH: f64 = 168.0;
+const STATUS_PANEL_COLLAPSED_HEIGHT: f64 = 44.0;
+const STATUS_PANEL_EXPANDED_WIDTH: f64 = 340.0;
+const STATUS_PANEL_EXPANDED_HEIGHT: f64 = 340.0;
+const STATUS_PANEL_EXPANDED_MIN_HEIGHT: f64 = 260.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PanelRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl PanelRect {
+    fn right(&self) -> i32 {
+        self.x + self.width
+    }
+
+    fn bottom(&self) -> i32 {
+        self.y + self.height
+    }
+}
+
+fn overlap_span(a_start: i32, a_end: i32, b_start: i32, b_end: i32) -> i32 {
+    (a_end.min(b_end) - a_start.max(b_start)).max(0)
+}
+
+fn clamp_axis(start: i32, length: i32, area_start: i32, area_length: i32) -> i32 {
+    if length >= area_length {
+        return area_start;
+    }
+    start.clamp(area_start, area_start + area_length - length)
+}
+
+/// Keeps a remembered panel position reachable. A saved position can point at a
+/// display that is no longer attached, or leave the panel almost entirely
+/// off-screen; both must resolve to somewhere the user can still grab it.
+/// Positions that are already visible enough are returned untouched so the
+/// panel never drifts on its own. `work_areas` must be ordered with the
+/// preferred fallback display first.
+fn clamp_panel_position(panel: PanelRect, work_areas: &[PanelRect]) -> (i32, i32) {
+    if work_areas.is_empty() {
+        return (panel.x, panel.y);
+    }
+    let visible = |area: &PanelRect| {
+        (
+            overlap_span(panel.x, panel.right(), area.x, area.right()),
+            overlap_span(panel.y, panel.bottom(), area.y, area.bottom()),
+        )
+    };
+    let required_horizontal = STATUS_PANEL_MIN_VISIBLE.min(panel.width);
+    let required_vertical = STATUS_PANEL_MIN_VISIBLE.min(panel.height);
+    let reachable = work_areas.iter().any(|area| {
+        let (horizontal, vertical) = visible(area);
+        horizontal >= required_horizontal && vertical >= required_vertical
+    });
+    if reachable {
+        return (panel.x, panel.y);
+    }
+    // Fall back to the work area the panel overlaps most. When it overlaps none,
+    // ties keep the first entry, which the caller orders as the primary display
+    // because that is where the user is looking.
+    let mut target = work_areas[0];
+    let mut best = -1i64;
+    for area in work_areas {
+        let (horizontal, vertical) = visible(area);
+        let score = i64::from(horizontal) * i64::from(vertical);
+        if score > best {
+            best = score;
+            target = *area;
+        }
+    }
+    (
+        clamp_axis(panel.x, panel.width, target.x, target.width),
+        clamp_axis(panel.y, panel.height, target.y, target.height),
+    )
+}
+
+/// Top-right of the work area, inset by a margin. An always-on-top monitor is
+/// useless where the OS would otherwise put it: under the Logic 2 window the
+/// user is about to focus.
+fn default_panel_position(panel_width: i32, work_area: PanelRect) -> (i32, i32) {
+    (
+        work_area.x + (work_area.width - panel_width - STATUS_PANEL_EDGE_MARGIN).max(0),
+        work_area.y + STATUS_PANEL_EDGE_MARGIN,
+    )
+}
+
+fn monitor_work_area(monitor: &tauri::Monitor) -> PanelRect {
+    let area = monitor.work_area();
+    PanelRect {
+        x: area.position.x,
+        y: area.position.y,
+        width: area.size.width as i32,
+        height: area.size.height as i32,
+    }
+}
+
+/// Work areas of every attached display, primary first. `available_monitors()`
+/// makes no ordering promise, and `clamp_panel_position` treats the first entry
+/// as the preferred fallback, so the primary display is hoisted explicitly.
+fn panel_work_areas(window: &tauri::WebviewWindow) -> Vec<PanelRect> {
+    let mut areas: Vec<PanelRect> = window
+        .available_monitors()
+        .map(|monitors| monitors.iter().map(monitor_work_area).collect())
+        .unwrap_or_default();
+    if let Some(primary) = window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| monitor_work_area(&monitor))
+    {
+        areas.retain(|area| *area != primary);
+        areas.insert(0, primary);
+    }
+    areas
+}
+
+fn panel_rect(window: &tauri::WebviewWindow) -> Option<PanelRect> {
+    let position = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    Some(PanelRect {
+        x: position.x,
+        y: position.y,
+        width: size.width as i32,
+        height: size.height as i32,
+    })
+}
+
+/// Places the panel before it becomes visible, so it never flashes at the
+/// position the OS picked.
+fn restore_status_panel_position(window: &tauri::WebviewWindow, saved: Option<PanelPosition>) {
+    let Some(rect) = panel_rect(window) else {
+        return;
+    };
+    let work_areas = panel_work_areas(window);
+    let (x, y) = match saved {
+        Some(position) => clamp_panel_position(
+            PanelRect {
+                x: position.x,
+                y: position.y,
+                ..rect
+            },
+            &work_areas,
+        ),
+        None => match work_areas.first() {
+            Some(area) => default_panel_position(rect.width, *area),
+            None => return,
+        },
+    };
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+/// Switches the panel between the full readout and a compact floating button.
+///
+/// The window carries no native decorations in either shape: a titlebar would
+/// duplicate the panel's own collapse and hide controls, and on a 44 px chip it
+/// would dwarf the chip entirely. Only the inner size changes here.
+fn apply_status_panel_collapsed(app: &AppHandle, window: &tauri::WebviewWindow, collapsed: bool) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let state = app.state::<AppState>();
+    // Cocoa anchors a resize at the bottom-left, so shrinking the panel would
+    // otherwise slide its visible top edge down the screen and leave the user
+    // hunting for the chip. Restoring the pre-resize origin keeps the corner the
+    // user actually looks at fixed.
+    let anchor = window.outer_position().ok();
+    if !collapsed {
+        // Restore the width the user had before collapsing rather than snapping
+        // back to the default every time.
+        let remembered = state.expanded_panel_width.load(Ordering::Acquire);
+        let width = if remembered > 0 {
+            f64::from(remembered).max(STATUS_PANEL_MIN_WIDTH)
+        } else {
+            STATUS_PANEL_EXPANDED_WIDTH
+        };
+        let _ = window.set_size(tauri::LogicalSize::new(width, STATUS_PANEL_EXPANDED_HEIGHT));
+        let _ = window.set_min_size(Some(tauri::LogicalSize::new(
+            STATUS_PANEL_MIN_WIDTH,
+            STATUS_PANEL_EXPANDED_MIN_HEIGHT,
+        )));
+    } else {
+        if let Ok(size) = window.inner_size() {
+            let logical = (f64::from(size.width) / scale).round();
+            if logical >= STATUS_PANEL_MIN_WIDTH {
+                state
+                    .expanded_panel_width
+                    .store(logical as u32, Ordering::Release);
+            }
+        }
+        // The floor has to drop before the window can shrink past it.
+        let _ = window.set_min_size(Some(tauri::LogicalSize::new(
+            STATUS_PANEL_COLLAPSED_WIDTH,
+            STATUS_PANEL_COLLAPSED_HEIGHT,
+        )));
+        let _ = window.set_size(tauri::LogicalSize::new(
+            STATUS_PANEL_COLLAPSED_WIDTH,
+            STATUS_PANEL_COLLAPSED_HEIGHT,
+        ));
+    }
+    if let Some(anchor) = anchor {
+        let _ = window.set_position(anchor);
+    }
+}
+
+fn snap_axis(start: i32, length: i32, area_start: i32, area_length: i32, threshold: i32) -> i32 {
+    if length >= area_length {
+        return start;
+    }
+    let area_end = area_start + area_length;
+    if (start - area_start).abs() <= threshold {
+        return area_start;
+    }
+    if (start + length - area_end).abs() <= threshold {
+        return area_end - length;
+    }
+    start
+}
+
+/// Snaps a panel to the work-area edges it came to rest near. Only ever applied
+/// after a drag settles, never while the pointer is moving, so it cannot fight
+/// the user mid-gesture.
+fn snap_to_work_area(panel: PanelRect, work_area: PanelRect, threshold: i32) -> (i32, i32) {
+    (
+        snap_axis(
+            panel.x,
+            panel.width,
+            work_area.x,
+            work_area.width,
+            threshold,
+        ),
+        snap_axis(
+            panel.y,
+            panel.height,
+            work_area.y,
+            work_area.height,
+            threshold,
+        ),
+    )
+}
+
+/// The work area the panel sits on, chosen by overlap so a panel straddling two
+/// displays snaps to the one showing most of it.
+fn work_area_under_panel(panel: PanelRect, work_areas: &[PanelRect]) -> Option<PanelRect> {
+    let mut best: Option<(i64, PanelRect)> = None;
+    for area in work_areas {
+        let score = i64::from(overlap_span(panel.x, panel.right(), area.x, area.right()))
+            * i64::from(overlap_span(panel.y, panel.bottom(), area.y, area.bottom()));
+        if score <= 0 {
+            continue;
+        }
+        if best.is_none_or(|(current, _)| score > current) {
+            best = Some((score, *area));
+        }
+    }
+    best.map(|(_, area)| area)
+}
+
+fn persist_status_panel_position(app: &AppHandle, position: PanelPosition) {
+    let mut settings = load_settings(app);
+    if settings.status_panel.position == Some(position) {
+        return;
+    }
+    settings.status_panel.position = Some(position);
+    let _ = store_settings(app, settings);
+}
+
+fn settle_status_panel(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let Some(rect) = panel_rect(window) else {
+        return;
+    };
+    let work_areas = panel_work_areas(window);
+    let (x, y) = match work_area_under_panel(rect, &work_areas) {
+        Some(area) => snap_to_work_area(rect, area, STATUS_PANEL_SNAP_THRESHOLD),
+        // Off every display: getting it back matters more than snapping.
+        None => clamp_panel_position(rect, &work_areas),
+    };
+    // Repositioning emits another `Moved`, but the next settle computes the same
+    // coordinates and stops there, so this converges after one idle pass.
+    if (x, y) != (rect.x, rect.y) {
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    persist_status_panel_position(app, PanelPosition { x, y });
+}
+
+/// `Moved` fires continuously while the user drags. Persisting on every event
+/// would thrash the config file, so the work runs once the panel has held still
+/// briefly.
+fn schedule_status_panel_settle(window: &tauri::WebviewWindow) {
+    let app = window.app_handle().clone();
+    let generation = app
+        .state::<AppState>()
+        .panel_move_generation
+        .fetch_add(1, Ordering::AcqRel)
+        + 1;
+    let window = window.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(STATUS_PANEL_SETTLE_MS));
+        if app
+            .state::<AppState>()
+            .panel_move_generation
+            .load(Ordering::Acquire)
+            != generation
+        {
+            return;
+        }
+        let settle_app = app.clone();
+        let _ = app.run_on_main_thread(move || settle_status_panel(&settle_app, &window));
+    });
+}
+
 fn show_main_window(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
@@ -2597,6 +3022,22 @@ fn show_status_panel(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     if let Some(window) = app.get_webview_window("status") {
+        let panel = load_settings(app).status_panel;
+        apply_status_panel_collapsed(app, &window, panel.collapsed);
+        restore_status_panel_position(&window, panel.position);
+        let _ = window.show();
+        let _ = window.set_always_on_top(true);
+    }
+}
+
+/// Reveals the panel without promoting the app to a regular activation policy.
+/// The automatic reveal happens exactly when focus is being handed to Logic 2,
+/// so activating here would snatch it straight back.
+fn show_status_panel_without_activating(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("status") {
+        let panel = load_settings(app).status_panel;
+        apply_status_panel_collapsed(app, &window, panel.collapsed);
+        restore_status_panel_position(&window, panel.position);
         let _ = window.show();
         let _ = window.set_always_on_top(true);
     }
@@ -2618,6 +3059,58 @@ fn status_panel_show(app: AppHandle) -> Result<(), String> {
 fn status_panel_hide(app: AppHandle) -> Result<(), String> {
     hide_status_panel(&app);
     Ok(())
+}
+
+#[tauri::command]
+fn status_panel_intro_acknowledge(app: AppHandle) -> Result<(), String> {
+    let mut settings = load_settings(&app);
+    if settings.guidance.status_panel_intro_seen {
+        return Ok(());
+    }
+    settings.guidance.status_panel_intro_seen = true;
+    store_settings(&app, settings)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn status_panel_set_auto_show(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = load_settings(&app);
+    if settings.status_panel.auto_show == enabled {
+        return Ok(());
+    }
+    settings.status_panel.auto_show = enabled;
+    store_settings(&app, settings)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn status_panel_set_collapsed(app: AppHandle, collapsed: bool) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("status") else {
+        return Err("状态面板窗口不可用".to_string());
+    };
+    apply_status_panel_collapsed(&app, &window, collapsed);
+    // Changing shape can leave a right- or bottom-snapped panel detached from the
+    // edge it was resting against, so re-settle instead of leaving a gap.
+    settle_status_panel(&app, &window);
+    let mut settings = load_settings(&app);
+    if settings.status_panel.collapsed != collapsed {
+        settings.status_panel.collapsed = collapsed;
+        store_settings(&app, settings)?;
+    }
+    Ok(())
+}
+
+/// Hands an in-progress pointer drag to the window manager. The collapsed chip
+/// is one big click target, so it cannot also be a static drag region: the
+/// renderer only calls this once the pointer has actually moved.
+#[tauri::command]
+fn status_panel_start_drag(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("status") else {
+        return Err("状态面板窗口不可用".to_string());
+    };
+    window
+        .start_dragging()
+        .map_err(|error| format!("无法拖动状态面板: {error}"))
 }
 
 #[tauri::command]
@@ -2711,12 +3204,49 @@ async fn client_initial_state(app: AppHandle) -> Result<InitialState, String> {
     })
 }
 
+/// Window geometry and guidance progress are owned by the backend; the main
+/// window never renders them and its save payload therefore omits them. Merging
+/// them back from disk stops an ordinary settings save from resetting the panel
+/// position, the collapsed shape, and the walkthrough flags to their defaults.
+fn merge_backend_owned_settings(
+    mut incoming: ClientSettings,
+    current: &ClientSettings,
+) -> ClientSettings {
+    incoming.guidance = current.guidance.clone();
+    incoming.status_panel = current.status_panel.clone();
+    incoming
+}
+
+/// The only way renderer-supplied settings may reach disk. Every entry point that
+/// accepts a `ClientSettings` from the UI must go through here: the main window
+/// neither renders nor returns the backend-owned sections, so a direct
+/// `store_settings` would reset the panel geometry and the walkthrough flags to
+/// their defaults.
+fn store_renderer_settings(
+    app: &AppHandle,
+    incoming: ClientSettings,
+) -> Result<ClientSettings, String> {
+    let current = load_settings(app);
+    store_settings(app, merge_backend_owned_settings(incoming, &current))
+}
+
+#[tauri::command]
+fn onboarding_complete(app: AppHandle) -> Result<(), String> {
+    let mut settings = load_settings(&app);
+    if settings.guidance.onboarding_completed_version == ONBOARDING_VERSION {
+        return Ok(());
+    }
+    settings.guidance.onboarding_completed_version = ONBOARDING_VERSION;
+    store_settings(&app, settings)?;
+    Ok(())
+}
+
 #[tauri::command]
 fn client_save_settings(
     app: AppHandle,
     settings: ClientSettings,
 ) -> Result<ClientSettings, String> {
-    store_settings(&app, settings)
+    store_renderer_settings(&app, settings)
 }
 
 #[tauri::command]
@@ -2844,7 +3374,9 @@ async fn bridge_start(app: AppHandle, settings: ClientSettings) -> Result<Bridge
 }
 
 fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<BridgeState, String> {
-    let mut settings = store_settings(app, settings)?;
+    // These settings came straight from the renderer, so the backend-owned
+    // sections have to be merged back before anything is written.
+    let mut settings = store_renderer_settings(app, settings)?;
     let inspection = validate_bridge_start_compatibility(app, &settings)?;
     settings.logic_app_path = inspection.path.clone();
     settings = store_settings(app, settings)?;
@@ -3348,10 +3880,21 @@ fn main() {
             status_panel_show,
             status_panel_hide,
             status_panel_toggle,
+            status_panel_set_collapsed,
+            status_panel_start_drag,
+            status_panel_intro_acknowledge,
+            status_panel_set_auto_show,
+            onboarding_complete,
             main_window_show,
         ])
         .setup(setup_tray)
         .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::Moved(_)) && window.label() == "status" {
+                if let Some(status) = window.app_handle().get_webview_window("status") {
+                    schedule_status_panel_settle(&status);
+                }
+                return;
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if !window
                     .app_handle()
@@ -3423,6 +3966,365 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    const PRIMARY_WORK_AREA: PanelRect = PanelRect {
+        x: 0,
+        y: 25,
+        width: 1920,
+        height: 1055,
+    };
+
+    fn status_panel_rect(x: i32, y: i32) -> PanelRect {
+        PanelRect {
+            x,
+            y,
+            width: 340,
+            height: 390,
+        }
+    }
+
+    #[test]
+    fn keeps_a_remembered_panel_position_that_is_still_reachable() {
+        let panel = status_panel_rect(1200, 400);
+        assert_eq!(
+            clamp_panel_position(panel, &[PRIMARY_WORK_AREA]),
+            (1200, 400),
+            "a fully visible panel must never be nudged"
+        );
+
+        // Hanging off the right edge with 70 px still showing is enough to grab.
+        let panel = status_panel_rect(1850, 400);
+        assert_eq!(
+            clamp_panel_position(panel, &[PRIMARY_WORK_AREA]),
+            (1850, 400)
+        );
+
+        // 20 px is not, so the panel is pulled back inside.
+        let panel = status_panel_rect(1900, 400);
+        assert_eq!(
+            clamp_panel_position(panel, &[PRIMARY_WORK_AREA]),
+            (1580, 400),
+            "a sliver of a 340 px panel is not a usable grab target"
+        );
+    }
+
+    #[test]
+    fn pulls_an_unreachable_panel_position_back_onto_a_work_area() {
+        // Saved while a second display was attached to the right; that display is
+        // gone, so the panel would open outside every work area.
+        let panel = status_panel_rect(3000, 500);
+        assert_eq!(
+            clamp_panel_position(panel, &[PRIMARY_WORK_AREA]),
+            (1580, 500),
+            "the panel must come back to the right edge of the surviving display"
+        );
+
+        // Dragged almost entirely above the menu bar.
+        let panel = status_panel_rect(400, -380);
+        assert_eq!(clamp_panel_position(panel, &[PRIMARY_WORK_AREA]), (400, 25));
+    }
+
+    #[test]
+    fn honours_a_secondary_display_left_of_the_primary() {
+        let secondary = PanelRect {
+            x: -1440,
+            y: 0,
+            width: 1440,
+            height: 900,
+        };
+        let panel = status_panel_rect(-1200, 300);
+        assert_eq!(
+            clamp_panel_position(panel, &[PRIMARY_WORK_AREA, secondary]),
+            (-1200, 300),
+            "negative coordinates are valid on a left-hand display"
+        );
+
+        // Beyond the left edge of every display, so the panel returns to the
+        // preferred fallback rather than the nearest edge: the primary display is
+        // where the user is looking.
+        let panel = status_panel_rect(-2000, 300);
+        assert_eq!(
+            clamp_panel_position(panel, &[PRIMARY_WORK_AREA, secondary]),
+            (0, 300)
+        );
+        // Ordering decides the fallback, which is why panel_work_areas hoists the
+        // primary monitor to the front.
+        assert_eq!(
+            clamp_panel_position(panel, &[secondary, PRIMARY_WORK_AREA]),
+            (-1440, 300)
+        );
+    }
+
+    #[test]
+    fn panel_position_survives_a_panel_larger_than_the_work_area() {
+        let tiny = PanelRect {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 200,
+        };
+        let panel = status_panel_rect(900, 900);
+        assert_eq!(
+            clamp_panel_position(panel, &[tiny]),
+            (0, 0),
+            "a panel that cannot fit is aligned to the work-area origin"
+        );
+
+        // Without monitor information the saved value is the best guess there is.
+        assert_eq!(clamp_panel_position(panel, &[]), (900, 900));
+    }
+
+    #[test]
+    fn defaults_the_panel_to_the_top_right_of_the_work_area() {
+        assert_eq!(
+            default_panel_position(340, PRIMARY_WORK_AREA),
+            (1556, 49),
+            "an always-on-top monitor belongs out of the way, not where the OS puts it"
+        );
+    }
+
+    #[test]
+    fn status_panel_settings_default_to_auto_show_at_no_remembered_position() {
+        let settings = StatusPanelSettings::default();
+        assert!(settings.auto_show);
+        assert!(!settings.collapsed);
+        assert_eq!(settings.position, None);
+    }
+
+    #[test]
+    fn status_panel_settings_round_trip_through_the_config_file() {
+        let stored = serde_json::to_string(&ClientSettings {
+            status_panel: StatusPanelSettings {
+                position: Some(PanelPosition { x: 1556, y: 49 }),
+                collapsed: true,
+                auto_show: false,
+            },
+            ..ClientSettings::default()
+        })
+        .unwrap();
+        let restored: ClientSettings = serde_json::from_str(&stored).unwrap();
+        let restored = restored.normalized();
+        assert_eq!(
+            restored.status_panel.position,
+            Some(PanelPosition { x: 1556, y: 49 })
+        );
+        assert!(restored.status_panel.collapsed);
+        assert!(!restored.status_panel.auto_show);
+    }
+
+    #[test]
+    fn settings_written_before_the_panel_existed_still_load() {
+        // Every field added for the guidance work must be optional, otherwise an
+        // upgrade would silently reset the user's whole configuration.
+        let legacy = r#"{
+            "logicAppPath": "/Applications/Saleae Logic.app",
+            "portMode": "auto",
+            "preferredPort": 12472,
+            "screenQuadrant": 3
+        }"#;
+        let settings: ClientSettings = serde_json::from_str(legacy).unwrap();
+        let settings = settings.normalized();
+        assert_eq!(settings.guidance.onboarding_completed_version, 0);
+        assert!(!settings.guidance.status_panel_intro_seen);
+        assert!(settings.status_panel.auto_show);
+        assert_eq!(settings.status_panel.position, None);
+    }
+
+    #[test]
+    fn a_future_onboarding_version_is_clamped_so_the_walkthrough_can_replay() {
+        let settings = ClientSettings {
+            guidance: GuidanceSettings {
+                onboarding_completed_version: ONBOARDING_VERSION + 7,
+                status_panel_intro_seen: true,
+            },
+            ..ClientSettings::default()
+        }
+        .normalized();
+        assert_eq!(
+            settings.guidance.onboarding_completed_version,
+            ONBOARDING_VERSION
+        );
+    }
+
+    #[test]
+    fn snaps_a_settled_panel_to_every_work_area_edge() {
+        let snap = |x, y| snap_to_work_area(status_panel_rect(x, y), PRIMARY_WORK_AREA, 16);
+
+        // Left, top, right, bottom in turn.
+        assert_eq!(snap(9, 400), (0, 400));
+        assert_eq!(snap(400, 34), (400, 25));
+        assert_eq!(snap(1570, 400), (1580, 400));
+        assert_eq!(snap(400, 682), (400, 690));
+
+        // Both axes at once lands the panel in the corner.
+        assert_eq!(snap(12, 33), (0, 25));
+        assert_eq!(snap(1572, 685), (1580, 690));
+    }
+
+    #[test]
+    fn leaves_a_panel_alone_when_it_settles_away_from_an_edge() {
+        let panel = status_panel_rect(700, 400);
+        assert_eq!(snap_to_work_area(panel, PRIMARY_WORK_AREA, 16), (700, 400));
+
+        // Exactly one pixel past the threshold on both axes.
+        let panel = status_panel_rect(17, 42);
+        assert_eq!(snap_to_work_area(panel, PRIMARY_WORK_AREA, 16), (17, 42));
+    }
+
+    #[test]
+    fn never_snaps_an_axis_the_panel_cannot_fit_on() {
+        let narrow = PanelRect {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 200,
+        };
+        let panel = status_panel_rect(5, 5);
+        assert_eq!(
+            snap_to_work_area(panel, narrow, 16),
+            (5, 5),
+            "snapping a panel wider than the work area has no meaningful edge"
+        );
+    }
+
+    #[test]
+    fn snapping_follows_the_display_showing_most_of_the_panel() {
+        let secondary = PanelRect {
+            x: -1440,
+            y: 0,
+            width: 1440,
+            height: 900,
+        };
+        let areas = [PRIMARY_WORK_AREA, secondary];
+
+        // Mostly on the secondary display, near its left edge.
+        let panel = status_panel_rect(-1430, 400);
+        let area = work_area_under_panel(panel, &areas).unwrap();
+        assert_eq!(area, secondary);
+        assert_eq!(snap_to_work_area(panel, area, 16), (-1440, 400));
+
+        // Straddling the seam but mostly on the primary.
+        let panel = status_panel_rect(-40, 400);
+        assert_eq!(
+            work_area_under_panel(panel, &areas).unwrap(),
+            PRIMARY_WORK_AREA
+        );
+
+        // Off every display, so there is nothing to snap to.
+        let panel = status_panel_rect(-5000, 400);
+        assert_eq!(work_area_under_panel(panel, &areas), None);
+    }
+
+    #[test]
+    fn an_ordinary_settings_save_cannot_wipe_backend_owned_state() {
+        // The main window never renders the panel geometry or the walkthrough
+        // flags, so its save payload omits them and serde fills in defaults.
+        // Without the merge, moving the panel and then changing any setting in the
+        // main window would silently forget where the panel was.
+        let current = ClientSettings {
+            guidance: GuidanceSettings {
+                onboarding_completed_version: ONBOARDING_VERSION,
+                status_panel_intro_seen: true,
+            },
+            status_panel: StatusPanelSettings {
+                position: Some(PanelPosition { x: 1556, y: 49 }),
+                collapsed: true,
+                auto_show: false,
+            },
+            ..ClientSettings::default()
+        };
+        let from_renderer: ClientSettings = serde_json::from_str(
+            r#"{
+                "logicAppPath": "/Applications/Saleae Logic.app",
+                "portMode": "auto",
+                "preferredPort": 12472,
+                "screenQuadrant": 3
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            from_renderer.status_panel.position, None,
+            "the renderer payload really does omit the panel state"
+        );
+
+        let merged = merge_backend_owned_settings(from_renderer, &current).normalized();
+        assert_eq!(
+            merged.status_panel.position,
+            Some(PanelPosition { x: 1556, y: 49 })
+        );
+        assert!(merged.status_panel.collapsed);
+        assert!(!merged.status_panel.auto_show);
+        assert_eq!(
+            merged.guidance.onboarding_completed_version,
+            ONBOARDING_VERSION
+        );
+        assert!(merged.guidance.status_panel_intro_seen);
+        // The renderer still owns everything it does send.
+        assert_eq!(merged.logic_app_path, "/Applications/Saleae Logic.app");
+    }
+
+    #[test]
+    fn reveals_the_panel_only_when_the_bridge_goes_live_and_it_is_hidden() {
+        assert!(should_auto_show_status_panel("running", true, false));
+
+        // Already visible: revealing again would fight a user who positioned it.
+        assert!(!should_auto_show_status_panel("running", true, true));
+        // Opted out.
+        assert!(!should_auto_show_status_panel("running", false, false));
+        // Every other phase, including the transient ones on the way to running.
+        for phase in ["stopped", "starting", "stopping", "recovery", "error"] {
+            assert!(
+                !should_auto_show_status_panel(phase, true, false),
+                "{phase} must not reveal the panel"
+            );
+        }
+    }
+
+    #[test]
+    fn the_window_config_floor_allows_the_collapsed_chip() {
+        // Collapsing sets the inner size to the chip dimensions. If either
+        // configured minimum ever rises above them the panel silently refuses to
+        // collapse, which a unit test of the resize code alone cannot see.
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let status = config["app"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|window| window["label"] == "status")
+            .expect("the status panel window must exist");
+        let min_width = status["minWidth"].as_f64().unwrap();
+        let min_height = status["minHeight"].as_f64().unwrap();
+        assert!(
+            min_width <= STATUS_PANEL_COLLAPSED_WIDTH,
+            "configured minWidth {min_width} blocks the {STATUS_PANEL_COLLAPSED_WIDTH} px chip"
+        );
+        assert!(
+            min_height <= STATUS_PANEL_COLLAPSED_HEIGHT,
+            "configured minHeight {min_height} blocks the {STATUS_PANEL_COLLAPSED_HEIGHT} px chip"
+        );
+        // The chip only earns its keep by being much smaller than the readout.
+        assert!(STATUS_PANEL_COLLAPSED_HEIGHT < STATUS_PANEL_EXPANDED_MIN_HEIGHT);
+        assert!(STATUS_PANEL_COLLAPSED_WIDTH < STATUS_PANEL_MIN_WIDTH);
+        // Expanding re-applies the real minimum, so the default must satisfy it.
+        assert!(STATUS_PANEL_EXPANDED_WIDTH >= STATUS_PANEL_MIN_WIDTH);
+        assert!(STATUS_PANEL_EXPANDED_HEIGHT >= STATUS_PANEL_EXPANDED_MIN_HEIGHT);
+
+        // The panel is deliberately shown without focus while Logic 2 owns it, and
+        // macOS otherwise swallows the first click on an inactive window just to
+        // activate it. Without this the chip needs two clicks to expand, which is
+        // the very problem the chip exists to solve.
+        assert_eq!(
+            status["acceptFirstMouse"], true,
+            "the collapsed chip must expand on the first click"
+        );
+        // A native titlebar would duplicate the panel's own collapse and hide
+        // controls and would dwarf the chip, so the panel draws its own chrome.
+        assert_eq!(
+            status["decorations"], false,
+            "the panel owns its window controls"
+        );
+    }
+
     #[test]
     fn normalizes_client_settings() {
         let settings = ClientSettings {
@@ -3443,6 +4345,8 @@ mod tests {
                 },
             )]),
             pxlogic_firmware_id: String::new(),
+            guidance: GuidanceSettings::default(),
+            status_panel: StatusPanelSettings::default(),
             pending_profile_fingerprint: None,
         }
         .normalized();

@@ -539,6 +539,24 @@ function ensureNativeHost() {
     if (result.status !== 0) {
       throw new Error(`Failed to compile native host:\n${result.stderr || result.stdout}`);
     }
+    if (process.platform === 'darwin') {
+      // clang emits a "linker-signed" ad-hoc signature, which stops validating
+      // once the binary is copied by a process carrying provenance. macOS then
+      // kills the copy with SIGKILL (Code Signature Invalid) before it prints a
+      // line. Re-signing yields a genuine ad-hoc signature that survives copying.
+      // Only the binary this call just produced is touched, so a signed
+      // application bundle is never modified.
+      const signed = spawnSync(
+        'codesign',
+        ['--force', '--sign', '-', executable],
+        { cwd: bridgeRoot, encoding: 'utf8' },
+      );
+      if (signed.status !== 0) {
+        throw new Error(
+          `Failed to sign native host:\n${signed.stderr || signed.stdout}`,
+        );
+      }
+    }
   }
   return executable;
 }
