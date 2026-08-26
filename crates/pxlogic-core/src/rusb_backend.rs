@@ -1727,6 +1727,45 @@ fn endpoint_recovery(error: rusb::Error, already_retried: bool) -> EndpointRecov
     EndpointRecovery::ClearThenPropagate
 }
 
+/// How many consecutive zero-byte bulk completions `bulk_*_exact` tolerates
+/// before giving up. libusb reports a zero-length packet as `Ok(0)`, which is a
+/// legitimate one-off handshake but never makes progress, so a few are absorbed
+/// and a run of them is treated as a device fault.
+const MAX_ZERO_PROGRESS_TRANSFERS: u32 = 16;
+
+/// Guarantees that `bulk_*_exact` terminates.
+///
+/// Both helpers loop until the whole buffer has moved. A device that keeps
+/// completing transfers with zero bytes would otherwise spin forever, because
+/// `Ok(0)` is not an error and leaves the remaining length unchanged. Progress is
+/// tracked instead of a wall-clock deadline on purpose: bitstream uploads run
+/// with [`protocol::FPGA_UPLOAD_TIMEOUT_MS`] set to 0 (unbounded by design), so a
+/// deadline would abort a legitimate multi-second transfer.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct BulkProgressGuard {
+    zero_progress_transfers: u32,
+}
+
+impl BulkProgressGuard {
+    /// Records one completed transfer. Returns `false` once the endpoint has
+    /// produced [`MAX_ZERO_PROGRESS_TRANSFERS`] zero-byte completions in a row,
+    /// meaning the caller must stop looping and report a failure.
+    fn record(&mut self, transferred: usize) -> bool {
+        if transferred > 0 {
+            self.zero_progress_transfers = 0;
+            return true;
+        }
+        self.zero_progress_transfers = self.zero_progress_transfers.saturating_add(1);
+        self.zero_progress_transfers < MAX_ZERO_PROGRESS_TRANSFERS
+    }
+}
+
+fn bulk_zero_progress_error(endpoint: u8, remaining: usize, direction: &str) -> CoreError {
+    CoreError::Usb(format!(
+        "PXLogic endpoint 0x{endpoint:02x} completed {MAX_ZERO_PROGRESS_TRANSFERS} transfers without {direction} any of the remaining {remaining} bytes"
+    ))
+}
+
 fn claim_pxlogic_interfaces_once(
     handle: &mut DeviceHandle<Context>,
 ) -> std::result::Result<(), (u8, rusb::Error)> {
@@ -1911,9 +1950,15 @@ fn bulk_write_exact(
 ) -> Result<()> {
     let timeout = Duration::from_millis(timeout_ms);
     let mut already_retried = false;
+    let mut progress = BulkProgressGuard::default();
     while !data.is_empty() {
         match handle.write_bulk(endpoint, data, timeout) {
-            Ok(written) => data = &data[written..],
+            Ok(written) => {
+                if !progress.record(written) {
+                    return Err(bulk_zero_progress_error(endpoint, data.len(), "writing"));
+                }
+                data = &data[written..];
+            }
             Err(error) => match endpoint_recovery(error, already_retried) {
                 EndpointRecovery::Propagate => return Err(error.into()),
                 EndpointRecovery::ClearThenPropagate => {
@@ -1938,10 +1983,17 @@ fn bulk_read_exact(
 ) -> Result<()> {
     let timeout = Duration::from_millis(timeout_ms);
     let mut already_retried = false;
+    let mut progress = BulkProgressGuard::default();
     let mut offset = 0;
     while offset < data.len() {
+        let remaining = data.len() - offset;
         match handle.read_bulk(endpoint, &mut data[offset..], timeout) {
-            Ok(read) => offset += read,
+            Ok(read) => {
+                if !progress.record(read) {
+                    return Err(bulk_zero_progress_error(endpoint, remaining, "reading"));
+                }
+                offset += read;
+            }
             Err(error) => match endpoint_recovery(error, already_retried) {
                 EndpointRecovery::Propagate => return Err(error.into()),
                 EndpointRecovery::ClearThenPropagate => {
@@ -2055,6 +2107,55 @@ mod tests {
                 "{error:?} must be propagated untouched"
             );
         }
+    }
+
+    #[test]
+    fn bulk_progress_guard_gives_up_after_a_run_of_zero_byte_transfers() {
+        let mut guard = BulkProgressGuard::default();
+        for attempt in 1..MAX_ZERO_PROGRESS_TRANSFERS {
+            assert!(
+                guard.record(0),
+                "zero-byte completion {attempt} must still be tolerated"
+            );
+        }
+        assert!(
+            !guard.record(0),
+            "the {MAX_ZERO_PROGRESS_TRANSFERS}th consecutive zero-byte completion must abort"
+        );
+    }
+
+    #[test]
+    fn bulk_progress_guard_resets_once_bytes_move() {
+        let mut guard = BulkProgressGuard::default();
+        for _ in 0..MAX_ZERO_PROGRESS_TRANSFERS - 1 {
+            assert!(guard.record(0));
+        }
+        assert!(guard.record(1), "a real transfer must clear the guard");
+        assert_eq!(guard, BulkProgressGuard::default());
+        for _ in 0..MAX_ZERO_PROGRESS_TRANSFERS - 1 {
+            assert!(
+                guard.record(0),
+                "the tolerance must be available again after progress"
+            );
+        }
+        assert!(!guard.record(0));
+    }
+
+    #[test]
+    fn bulk_progress_guard_never_blocks_a_transfer_that_makes_progress() {
+        let mut guard = BulkProgressGuard::default();
+        for _ in 0..MAX_ZERO_PROGRESS_TRANSFERS * 4 {
+            assert!(guard.record(64));
+        }
+    }
+
+    #[test]
+    fn zero_progress_error_names_the_endpoint_and_remaining_bytes() {
+        let error = bulk_zero_progress_error(protocol::BULK_EP_REG_IN, 16, "reading");
+        let message = error.to_string();
+        assert!(message.contains("0x81"), "{message}");
+        assert!(message.contains("16 bytes"), "{message}");
+        assert!(message.contains("reading"), "{message}");
     }
 
     #[test]
