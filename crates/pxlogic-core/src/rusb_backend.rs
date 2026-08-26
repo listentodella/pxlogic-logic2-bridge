@@ -1676,6 +1676,57 @@ fn is_transient_usb_access_error(error: rusb::Error) -> bool {
     matches!(error, rusb::Error::Access | rusb::Error::Busy)
 }
 
+/// What to do with a bulk endpoint after a failed transfer.
+///
+/// A halted endpoint stays halted until it is explicitly cleared. Without this
+/// recovery a single stall makes every later register access on the same
+/// endpoint fail, which the Bridge reports as a permanent capture failure even
+/// though the device is still usable. PXView clears the halt for the same
+/// reason (`libsigrok/src/hardware/pxlogic/usb_ctrl.c`, `usb_wr_reg`/
+/// `usb_rd_reg`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointRecovery {
+    /// Propagate the error; the endpoint is not recoverable by clearing it.
+    Propagate,
+    /// Clear the halt so the next call starts from a clean endpoint, but do not
+    /// retry this transfer.
+    ClearThenPropagate,
+    /// Clear the halt and retry this transfer once.
+    ClearThenRetry,
+}
+
+/// `true` when the endpoint is halted and `clear_halt` is the prescribed
+/// recovery. `LIBUSB_ERROR_PIPE` is the only error libusb defines as "the
+/// endpoint halted".
+fn is_endpoint_stall_error(error: rusb::Error) -> bool {
+    matches!(error, rusb::Error::Pipe)
+}
+
+/// `true` when the transfer left the endpoint in an undefined state, so the halt
+/// should be cleared even if this transfer cannot be retried safely.
+fn leaves_endpoint_halted(error: rusb::Error) -> bool {
+    matches!(
+        error,
+        rusb::Error::Pipe | rusb::Error::Io | rusb::Error::Overflow
+    )
+}
+
+/// Resolves the recovery for a failed bulk transfer.
+///
+/// At most one retry is granted per `bulk_*_exact` call: a device that keeps
+/// stalling must surface as an error instead of spinning. `Timeout` is excluded
+/// on purpose because the caller uses short timeouts as a cancellation poll, and
+/// `Access`/`Busy` are handled by [`open_with_retry`] at open time instead.
+fn endpoint_recovery(error: rusb::Error, already_retried: bool) -> EndpointRecovery {
+    if !leaves_endpoint_halted(error) {
+        return EndpointRecovery::Propagate;
+    }
+    if is_endpoint_stall_error(error) && !already_retried {
+        return EndpointRecovery::ClearThenRetry;
+    }
+    EndpointRecovery::ClearThenPropagate
+}
+
 fn claim_pxlogic_interfaces_once(
     handle: &mut DeviceHandle<Context>,
 ) -> std::result::Result<(), (u8, rusb::Error)> {
@@ -1858,9 +1909,23 @@ fn bulk_write_exact(
     mut data: &[u8],
     timeout_ms: u64,
 ) -> Result<()> {
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut already_retried = false;
     while !data.is_empty() {
-        let written = handle.write_bulk(endpoint, data, Duration::from_millis(timeout_ms))?;
-        data = &data[written..];
+        match handle.write_bulk(endpoint, data, timeout) {
+            Ok(written) => data = &data[written..],
+            Err(error) => match endpoint_recovery(error, already_retried) {
+                EndpointRecovery::Propagate => return Err(error.into()),
+                EndpointRecovery::ClearThenPropagate => {
+                    let _ = handle.clear_halt(endpoint);
+                    return Err(error.into());
+                }
+                EndpointRecovery::ClearThenRetry => {
+                    let _ = handle.clear_halt(endpoint);
+                    already_retried = true;
+                }
+            },
+        }
     }
     Ok(())
 }
@@ -1871,14 +1936,24 @@ fn bulk_read_exact(
     data: &mut [u8],
     timeout_ms: u64,
 ) -> Result<()> {
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut already_retried = false;
     let mut offset = 0;
     while offset < data.len() {
-        let read = handle.read_bulk(
-            endpoint,
-            &mut data[offset..],
-            Duration::from_millis(timeout_ms),
-        )?;
-        offset += read;
+        match handle.read_bulk(endpoint, &mut data[offset..], timeout) {
+            Ok(read) => offset += read,
+            Err(error) => match endpoint_recovery(error, already_retried) {
+                EndpointRecovery::Propagate => return Err(error.into()),
+                EndpointRecovery::ClearThenPropagate => {
+                    let _ = handle.clear_halt(endpoint);
+                    return Err(error.into());
+                }
+                EndpointRecovery::ClearThenRetry => {
+                    let _ = handle.clear_halt(endpoint);
+                    already_retried = true;
+                }
+            },
+        }
     }
     Ok(())
 }
@@ -1895,6 +1970,91 @@ mod tests {
         assert!(is_transient_usb_access_error(rusb::Error::Busy));
         assert!(!is_transient_usb_access_error(rusb::Error::NoDevice));
         assert!(!is_transient_usb_access_error(rusb::Error::Timeout));
+    }
+
+    #[test]
+    fn only_pipe_errors_count_as_endpoint_stalls() {
+        assert!(is_endpoint_stall_error(rusb::Error::Pipe));
+        for error in [
+            rusb::Error::Io,
+            rusb::Error::Overflow,
+            rusb::Error::Timeout,
+            rusb::Error::NoDevice,
+            rusb::Error::Access,
+            rusb::Error::Busy,
+        ] {
+            assert!(
+                !is_endpoint_stall_error(error),
+                "{error:?} must not be treated as an endpoint stall"
+            );
+        }
+    }
+
+    #[test]
+    fn halt_is_cleared_only_for_errors_that_dirty_the_endpoint() {
+        for error in [rusb::Error::Pipe, rusb::Error::Io, rusb::Error::Overflow] {
+            assert!(
+                leaves_endpoint_halted(error),
+                "{error:?} must clear the endpoint halt"
+            );
+        }
+        for error in [
+            rusb::Error::Timeout,
+            rusb::Error::NoDevice,
+            rusb::Error::NotFound,
+            rusb::Error::Access,
+            rusb::Error::Busy,
+            rusb::Error::Interrupted,
+        ] {
+            assert!(
+                !leaves_endpoint_halted(error),
+                "{error:?} must not clear the endpoint halt"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_stall_is_cleared_and_retried_exactly_once() {
+        assert_eq!(
+            endpoint_recovery(rusb::Error::Pipe, false),
+            EndpointRecovery::ClearThenRetry
+        );
+        assert_eq!(
+            endpoint_recovery(rusb::Error::Pipe, true),
+            EndpointRecovery::ClearThenPropagate
+        );
+    }
+
+    #[test]
+    fn dirty_endpoint_errors_are_cleared_without_retrying() {
+        for error in [rusb::Error::Io, rusb::Error::Overflow] {
+            assert_eq!(
+                endpoint_recovery(error, false),
+                EndpointRecovery::ClearThenPropagate,
+                "{error:?} must clear the halt but not retry"
+            );
+        }
+    }
+
+    #[test]
+    fn cancellation_and_open_time_errors_are_propagated_untouched() {
+        // Short `Timeout` results are the capture cancellation poll, and
+        // `Access`/`Busy` are retried by `open_with_retry` instead. Neither may
+        // trigger a clear_halt or a hidden retry here.
+        for error in [
+            rusb::Error::Timeout,
+            rusb::Error::Access,
+            rusb::Error::Busy,
+            rusb::Error::NoDevice,
+            rusb::Error::NotFound,
+            rusb::Error::Interrupted,
+        ] {
+            assert_eq!(
+                endpoint_recovery(error, false),
+                EndpointRecovery::Propagate,
+                "{error:?} must be propagated untouched"
+            );
+        }
     }
 
     #[test]
