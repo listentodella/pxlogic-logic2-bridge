@@ -316,8 +316,33 @@ select:focus {
 
 .hardware-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(130px, 0.65fr) minmax(190px, 1fr);
+  grid-template-columns:
+    minmax(0, 1.5fr)
+    minmax(130px, 0.65fr)
+    minmax(190px, 1fr)
+    minmax(190px, 1fr);
   gap: 16px;
+}
+
+/* Shown only while a non-latest MCU firmware is selected. Starting the Bridge
+   reprograms the device, so the choice stays visible instead of living only in
+   the picker. */
+.firmware-warning {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px solid #e4c26a;
+  border-radius: 6px;
+  background: #fdf6e3;
+  color: #805c12;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.dialog-note {
+  margin: 12px 0 0;
+  color: #7a4a3c;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .hardware-controls select,

@@ -57,7 +57,7 @@
       "../../../../resources/bitstreams/hspi_ddr.bin": "resources/bitstreams/hspi_ddr.bin",
       "../../../../resources/bitstreams/hspi_ddr_RST.bin": "resources/bitstreams/hspi_ddr_RST.bin",
       "../../../../resources/bitstreams/LICENSE.txt": "resources/bitstreams/LICENSE.txt",
-      "../../../../resources/firmware/SCI_LOGIC.bin": "resources/firmware/SCI_LOGIC.bin"
+      "../../../../resources/firmware": "resources/firmware"
     },
     "macOS": {
       "minimumSystemVersion": "11.0",

@@ -56,6 +56,13 @@ const elements = {
   pxlogicRescanButton: document.querySelector('#pxlogic-rescan-button'),
   pxlogicDevice: document.querySelector('#pxlogic-device'),
   pxlogicThreshold: document.querySelector('#pxlogic-threshold'),
+  pxlogicFirmwareVersion: document.querySelector('#pxlogic-firmware-version'),
+  firmwareDowngradeWarning: document.querySelector('#firmware-downgrade-warning'),
+  firmwareDowngradeConfirmation: document.querySelector('#firmware-downgrade-confirmation'),
+  firmwareDowngradeMessage: document.querySelector('#firmware-downgrade-message'),
+  firmwareDowngradeCheckbox: document.querySelector('#firmware-downgrade-checkbox'),
+  confirmFirmwareDowngradeButton: document.querySelector('#confirm-firmware-downgrade-button'),
+  cancelFirmwareDowngradeButton: document.querySelector('#cancel-firmware-downgrade-button'),
   thresholdReference: document.querySelector('#threshold-reference'),
   thresholdVerified: document.querySelector('#threshold-verified'),
   thresholdGuidance: document.querySelector('#threshold-guidance'),
@@ -606,6 +613,11 @@ function renderHardware(hardware) {
   elements.pxlogicFirmware.textContent = hardware?.firmwareResourceReady
     ? device?.ready ? '就绪' : '资源就绪'
     : '缺失';
+  // Name the image that would actually be programmed, so a non-default
+  // selection is visible without opening the picker.
+  elements.pxlogicFirmware.title = hardware?.firmwareRelease
+    ? `${hardware.firmwareRelease.label} · ${hardware.firmwareRelease.firmwareVersion}`
+    : '';
   elements.pxlogicBitstream.textContent = hardware?.bitstreamResourcesReady ? '自动加载' : '缺失';
   elements.pxlogicFirmware.classList.toggle(
     'hardware-error',
@@ -699,12 +711,117 @@ function readSettings(pendingProfileFingerprint = null) {
     pxlogicDeviceId: elements.pxlogicDevice.value,
     pxlogicThresholdVolts: Number(elements.pxlogicThreshold.value),
     pxlogicThresholdProfiles: JSON.parse(JSON.stringify(thresholdProfiles)),
+    pxlogicFirmwareId: elements.pxlogicFirmwareVersion.value,
     pendingProfileFingerprint,
   };
 }
 
 function persistSettings() {
   void api.saveSettings(readSettings()).catch(error => appendLog(`[client] ${errorMessage(error)}`));
+}
+
+// Firmware images offered by resources/firmware/releases.json, newest first.
+let firmwareReleases = [];
+// The selection to fall back to when the user cancels a downgrade, so a
+// cancelled dialog cannot leave a non-latest image selected.
+let lastConfirmedFirmwareId = '';
+
+function latestFirmwareRelease() {
+  return firmwareReleases.find(release => release.latest) || firmwareReleases[0] || null;
+}
+
+function findFirmwareRelease(id) {
+  return firmwareReleases.find(release => release.id === id) || null;
+}
+
+function renderFirmwareReleases(releases, selectedId) {
+  firmwareReleases = Array.isArray(releases) ? releases : [];
+  const select = elements.pxlogicFirmwareVersion;
+  select.replaceChildren();
+  if (!firmwareReleases.length) {
+    // Nothing to choose from: keep the control out of the way rather than
+    // showing an empty picker the Bridge cannot honour.
+    select.disabled = true;
+    select.parentElement.hidden = true;
+    renderFirmwareWarning();
+    return;
+  }
+  select.parentElement.hidden = false;
+  select.disabled = false;
+  for (const release of firmwareReleases) {
+    const option = document.createElement('option');
+    option.value = release.id;
+    option.textContent = release.latest
+      ? `${release.label} · ${release.firmwareVersion}（最新）`
+      : `${release.label} · ${release.firmwareVersion}`;
+    select.append(option);
+  }
+  const latest = latestFirmwareRelease();
+  const resolved = findFirmwareRelease(selectedId) || latest;
+  select.value = resolved ? resolved.id : '';
+  lastConfirmedFirmwareId = select.value;
+  renderFirmwareWarning();
+}
+
+function renderFirmwareWarning() {
+  const warning = elements.firmwareDowngradeWarning;
+  const release = findFirmwareRelease(elements.pxlogicFirmwareVersion.value);
+  if (!release || release.latest) {
+    warning.hidden = true;
+    warning.textContent = '';
+    return;
+  }
+  const latest = latestFirmwareRelease();
+  const suffix = latest ? `，最新版本为 ${latest.label} · ${latest.firmwareVersion}` : '';
+  warning.hidden = false;
+  warning.textContent =
+    `已选择较旧的 MCU 固件 ${release.label} · ${release.firmwareVersion}${suffix}。` +
+    'Bridge 启动时会改写设备固件；仅在需要复现该固件版本的行为时保留此选择。';
+}
+
+// Returns true when the selection may be kept. Downgrades need an explicit
+// confirmation because starting the Bridge reprograms the device.
+async function confirmFirmwareSelection() {
+  const release = findFirmwareRelease(elements.pxlogicFirmwareVersion.value);
+  if (!release || release.latest || release.id === lastConfirmedFirmwareId) return true;
+  const dialog = elements.firmwareDowngradeConfirmation;
+  if (typeof dialog.showModal !== 'function') return true;
+  const latest = latestFirmwareRelease();
+  elements.firmwareDowngradeMessage.textContent =
+    `将把 PXLogic 的 MCU 固件从 ${latest ? `${latest.label} · ${latest.firmwareVersion}` : '当前版本'}` +
+    ` 改为 ${release.label} · ${release.firmwareVersion}（PXView 提交 ${release.pxviewCommit}，发布于 ${release.released}）。` +
+    (release.notes ? ` ${release.notes}` : '');
+  elements.firmwareDowngradeCheckbox.checked = false;
+  elements.confirmFirmwareDowngradeButton.disabled = true;
+  dialog.showModal();
+  const accepted = await new Promise(resolve => {
+    const finish = value => {
+      elements.confirmFirmwareDowngradeButton.removeEventListener('click', onConfirm);
+      elements.cancelFirmwareDowngradeButton.removeEventListener('click', onCancel);
+      dialog.removeEventListener('cancel', onCancel);
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onConfirm = () => {
+      if (!elements.firmwareDowngradeCheckbox.checked) return;
+      finish(true);
+    };
+    const onCancel = event => {
+      if (event) event.preventDefault();
+      finish(false);
+    };
+    elements.confirmFirmwareDowngradeButton.addEventListener('click', onConfirm);
+    elements.cancelFirmwareDowngradeButton.addEventListener('click', onCancel);
+    dialog.addEventListener('cancel', onCancel);
+  });
+  if (!accepted) {
+    const fallback = findFirmwareRelease(lastConfirmedFirmwareId) || latestFirmwareRelease();
+    elements.pxlogicFirmwareVersion.value = fallback ? fallback.id : '';
+    renderFirmwareWarning();
+    return false;
+  }
+  lastConfirmedFirmwareId = release.id;
+  return true;
 }
 
 function appendLog(line) {
@@ -802,11 +919,20 @@ elements.thresholdReference.addEventListener('change', () => {
   rememberThresholdProfile();
   persistSettings();
 });
+elements.pxlogicFirmwareVersion.addEventListener('change', () => {
+  void (async () => {
+    const accepted = await confirmFirmwareSelection();
+    renderFirmwareWarning();
+    if (accepted) persistSettings();
+  })();
+});
+elements.firmwareDowngradeCheckbox.addEventListener('change', () => {
+  elements.confirmFirmwareDowngradeButton.disabled = !elements.firmwareDowngradeCheckbox.checked;
+});
 elements.thresholdVerified.addEventListener('change', () => {
   updateThresholdLabel();
   rememberThresholdProfile();
-  persistSettings();
-});
+  persistSettings();});
 elements.pxlogicRescanButton.addEventListener('click', async () => {
   hardwareScanning = true;
   renderState(currentState);
@@ -855,8 +981,7 @@ elements.statusPanelButton.addEventListener('click', async () => {
 });
 elements.experimentalConfirmationCheckbox.addEventListener('change', () => {
   elements.continueExperimentalButton.disabled = !elements.experimentalConfirmationCheckbox.checked;
-});
-elements.cancelExperimentalButton.addEventListener('click', () => {
+});elements.cancelExperimentalButton.addEventListener('click', () => {
   clearExperimentalConfirmation();
   elements.experimentalConfirmation.close();
 });
@@ -931,6 +1056,7 @@ async function initialize() {
       initial.settings.pxlogicComparatorThresholdVolts ?? 1.8,
   );
   thresholdProfiles = JSON.parse(JSON.stringify(initial.settings.pxlogicThresholdProfiles || {}));
+  renderFirmwareReleases(initial.firmwareReleases, initial.settings.pxlogicFirmwareId);
   elements.screenQuadrant.value = initial.settings.maximizeLogicWindow === false
     ? String(initial.settings.screenQuadrant)
     : 'maximized';

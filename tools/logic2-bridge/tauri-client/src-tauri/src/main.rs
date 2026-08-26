@@ -45,6 +45,11 @@ struct ClientSettings {
     temporary_comparator_threshold_volts: Option<f64>,
     #[serde(default)]
     pxlogic_threshold_profiles: BTreeMap<String, ThresholdProfile>,
+    /// Selected entry from `resources/firmware/releases.json`. An empty or
+    /// unrecognised value is normalised back to the latest image, so the default
+    /// is always the newest firmware.
+    #[serde(default = "default_pxlogic_firmware_id")]
+    pxlogic_firmware_id: String,
     // This one-shot UI authorization is bound to the inspected GraphServer
     // fingerprint and must never be persisted with the user's settings.
     #[serde(default, skip_serializing)]
@@ -81,6 +86,7 @@ impl Default for ClientSettings {
             pxlogic_threshold_volts: default_pxlogic_threshold_volts(),
             temporary_comparator_threshold_volts: None,
             pxlogic_threshold_profiles: BTreeMap::new(),
+            pxlogic_firmware_id: default_pxlogic_firmware_id(),
             pending_profile_fingerprint: None,
         }
     }
@@ -111,6 +117,10 @@ impl ClientSettings {
                     && profile.volts.is_finite()
                     && (0.0..=MAX_PXLOGIC_THRESHOLD_VOLTS).contains(&profile.volts)
             });
+        self.pxlogic_firmware_id = self.pxlogic_firmware_id.trim().to_string();
+        if find_mcu_firmware_release(&self.pxlogic_firmware_id).is_none() {
+            self.pxlogic_firmware_id = default_pxlogic_firmware_id();
+        }
         self
     }
 }
@@ -162,6 +172,33 @@ struct CompatibilityManifest {
     #[serde(default)]
     analyzer_version: Option<u32>,
     profiles: Vec<CompatibilityProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McuFirmwareManifest {
+    schema_version: u32,
+    default: String,
+    releases: Vec<McuFirmwareRelease>,
+}
+
+/// One selectable PXLogic CH569 MCU firmware image. `firmware_version` is the
+/// value the image reports through the device firmware-version register, so it is
+/// what the capture helper compares against before deciding to reprogram.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McuFirmwareRelease {
+    id: String,
+    label: String,
+    firmware_version: String,
+    file_name: String,
+    byte_length: u64,
+    sha256: String,
+    pxview_commit: String,
+    released: String,
+    latest: bool,
+    #[serde(default)]
+    notes: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -396,6 +433,9 @@ struct InitialState {
     bridge_state: BridgeState,
     capture_telemetry: CaptureTelemetry,
     logs: Vec<String>,
+    /// Selectable MCU firmware images, newest first. Static for the life of the
+    /// build, so the renderer only needs it once.
+    firmware_releases: Vec<McuFirmwareRelease>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -424,6 +464,10 @@ struct PxlogicHardwareState {
     selected_device_id: Option<String>,
     firmware_resource_ready: bool,
     bitstream_resources_ready: bool,
+    /// Firmware the Bridge would program for the current selection. `None` when
+    /// the payload could not be validated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    firmware_release: Option<McuFirmwareRelease>,
     error: Option<String>,
 }
 
@@ -434,6 +478,7 @@ impl PxlogicHardwareState {
             selected_device_id: None,
             firmware_resource_ready: false,
             bitstream_resources_ready: false,
+            firmware_release: None,
             error: Some(error.into()),
         }
     }
@@ -902,6 +947,84 @@ fn compatibility_manifest() -> Result<CompatibilityManifest, String> {
         ));
     }
     Ok(manifest)
+}
+
+/// Selectable PXLogic MCU firmware images, embedded from
+/// `resources/firmware/releases.json` so the picker can be populated even
+/// before the payload on disk has been validated.
+fn mcu_firmware_manifest() -> Result<McuFirmwareManifest, String> {
+    let manifest: McuFirmwareManifest = serde_json::from_str(include_str!(
+        "../../../../../resources/firmware/releases.json"
+    ))
+    .map_err(|error| format!("PXLogic 固件清单无效: {error}"))?;
+    if manifest.schema_version != 1 {
+        return Err(format!(
+            "不支持的 PXLogic 固件清单版本: {}",
+            manifest.schema_version
+        ));
+    }
+    if manifest.releases.is_empty() {
+        return Err("PXLogic 固件清单为空".to_string());
+    }
+    if manifest
+        .releases
+        .iter()
+        .filter(|entry| entry.latest)
+        .count()
+        != 1
+    {
+        return Err("PXLogic 固件清单必须恰好标记一个 latest 版本".to_string());
+    }
+    let default_entry = manifest
+        .releases
+        .iter()
+        .find(|entry| entry.id == manifest.default)
+        .ok_or_else(|| format!("PXLogic 固件清单的默认版本不存在: {}", manifest.default))?;
+    if !default_entry.latest {
+        return Err("PXLogic 固件清单的默认版本必须是 latest 版本".to_string());
+    }
+    Ok(manifest)
+}
+
+fn mcu_firmware_releases() -> Vec<McuFirmwareRelease> {
+    mcu_firmware_manifest()
+        .map(|manifest| manifest.releases)
+        .unwrap_or_default()
+}
+
+/// The newest shipped firmware. New installs and any unrecognised selection land
+/// here, so a user who never touches the picker always runs the latest image.
+fn default_pxlogic_firmware_id() -> String {
+    mcu_firmware_manifest()
+        .map(|manifest| manifest.default)
+        .unwrap_or_default()
+}
+
+fn find_mcu_firmware_release(id: &str) -> Option<McuFirmwareRelease> {
+    mcu_firmware_manifest()
+        .ok()?
+        .releases
+        .into_iter()
+        .find(|entry| entry.id == id)
+}
+
+/// Resolves the firmware the Bridge should program, falling back to the latest
+/// image when the stored selection is unknown.
+fn selected_mcu_firmware(app: &AppHandle) -> Result<McuFirmwareRelease, String> {
+    let manifest = mcu_firmware_manifest()?;
+    let requested = load_settings(app).pxlogic_firmware_id;
+    manifest
+        .releases
+        .iter()
+        .find(|entry| entry.id == requested)
+        .or_else(|| {
+            manifest
+                .releases
+                .iter()
+                .find(|entry| entry.id == manifest.default)
+        })
+        .cloned()
+        .ok_or_else(|| "PXLogic 固件清单中没有可用版本".to_string())
 }
 
 fn read_u16_le(data: &[u8], offset: usize) -> Option<u16> {
@@ -1793,6 +1916,7 @@ struct BridgePayload {
     helper: PathBuf,
     bitstreams: PathBuf,
     firmware: PathBuf,
+    firmware_release: McuFirmwareRelease,
 }
 
 const BRIDGE_NODE_RUNTIME_FILES: &[&str] = &[
@@ -1814,7 +1938,7 @@ fn bridge_payload_required_paths(
     native_host: &Path,
     helper: &Path,
     bitstreams: &Path,
-    firmware: &Path,
+    firmware_dir: &Path,
 ) -> Vec<PathBuf> {
     let mut required = BRIDGE_NODE_RUNTIME_FILES
         .iter()
@@ -1825,8 +1949,15 @@ fn bridge_payload_required_paths(
         helper.to_path_buf(),
         bitstreams.join("hspi_ddr.bin"),
         bitstreams.join("hspi_ddr_RST.bin"),
-        firmware.to_path_buf(),
+        firmware_dir.join("releases.json"),
     ]);
+    // Every selectable image must ship, otherwise the firmware picker can offer a
+    // version the payload cannot actually program.
+    required.extend(
+        mcu_firmware_releases()
+            .iter()
+            .map(|release| firmware_dir.join(&release.file_name)),
+    );
     required
 }
 
@@ -1849,9 +1980,9 @@ fn validate_bridge_payload(app: &AppHandle) -> Result<BridgePayload, String> {
             "usb_smoke"
         });
     let bitstreams = payload_root.join("resources/bitstreams");
-    let firmware = payload_root.join("resources/firmware/SCI_LOGIC.bin");
+    let firmware_dir = payload_root.join("resources/firmware");
     let required =
-        bridge_payload_required_paths(&root, &native_host, &helper, &bitstreams, &firmware);
+        bridge_payload_required_paths(&root, &native_host, &helper, &bitstreams, &firmware_dir);
     for path in required {
         if !path.is_file() {
             return Err(format!(
@@ -1860,12 +1991,41 @@ fn validate_bridge_payload(app: &AppHandle) -> Result<BridgePayload, String> {
             ));
         }
     }
+    let release = selected_mcu_firmware(app)?;
+    let firmware = firmware_dir.join(&release.file_name);
+    verify_mcu_firmware_image(&firmware, &release)?;
     Ok(BridgePayload {
         bridge_root: root,
         helper,
         bitstreams,
         firmware,
+        firmware_release: release,
     })
+}
+
+/// Rejects a firmware image that does not match the manifest before it can reach
+/// the device. Programming the MCU resets it and is not reversible from the
+/// Bridge, so a truncated or substituted image must fail here rather than at
+/// flash time.
+fn verify_mcu_firmware_image(path: &Path, release: &McuFirmwareRelease) -> Result<(), String> {
+    let image = fs::read(path)
+        .map_err(|error| format!("无法读取 PXLogic 固件 {}: {error}", path.display()))?;
+    if image.len() as u64 != release.byte_length {
+        return Err(format!(
+            "PXLogic 固件 {} 长度为 {} 字节，清单要求 {} 字节；请重新解压便携包。",
+            release.file_name,
+            image.len(),
+            release.byte_length
+        ));
+    }
+    let digest = format!("{:x}", Sha256::digest(&image));
+    if !digest.eq_ignore_ascii_case(&release.sha256) {
+        return Err(format!(
+            "PXLogic 固件 {} 校验失败：SHA-256 为 {digest}，清单要求 {}；请重新解压便携包。",
+            release.file_name, release.sha256
+        ));
+    }
+    Ok(())
 }
 
 fn scan_pxlogic_hardware(app: &AppHandle, preferred_device_id: &str) -> PxlogicHardwareState {
@@ -1915,6 +2075,7 @@ fn scan_pxlogic_hardware(app: &AppHandle, preferred_device_id: &str) -> PxlogicH
         firmware_resource_ready: payload.firmware.is_file(),
         bitstream_resources_ready: payload.bitstreams.join("hspi_ddr.bin").is_file()
             && payload.bitstreams.join("hspi_ddr_RST.bin").is_file(),
+        firmware_release: Some(payload.firmware_release),
         error: None,
     }
 }
@@ -2546,6 +2707,7 @@ async fn client_initial_state(app: AppHandle) -> Result<InitialState, String> {
         bridge_state,
         capture_telemetry,
         logs,
+        firmware_releases: mcu_firmware_releases(),
     })
 }
 
@@ -3280,6 +3442,7 @@ mod tests {
                     reference: "custom".to_string(),
                 },
             )]),
+            pxlogic_firmware_id: String::new(),
             pending_profile_fingerprint: None,
         }
         .normalized();
@@ -3603,6 +3766,145 @@ mod tests {
                 "Bridge payload contract references missing source file: {relative}"
             );
         }
+    }
+
+    fn repository_firmware_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../resources/firmware")
+    }
+
+    #[test]
+    fn firmware_manifest_is_well_formed_and_defaults_to_the_latest_image() {
+        let manifest = mcu_firmware_manifest().expect("firmware manifest");
+        assert_eq!(manifest.schema_version, 1);
+
+        let latest = manifest
+            .releases
+            .iter()
+            .filter(|release| release.latest)
+            .collect::<Vec<_>>();
+        assert_eq!(latest.len(), 1, "exactly one image may be marked latest");
+        assert_eq!(
+            latest[0].id, manifest.default,
+            "the default selection must be the latest image"
+        );
+        assert_eq!(default_pxlogic_firmware_id(), manifest.default);
+
+        let mut ids = manifest
+            .releases
+            .iter()
+            .map(|release| release.id.as_str())
+            .collect::<Vec<_>>();
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "firmware ids must be unique");
+
+        let mut versions = manifest
+            .releases
+            .iter()
+            .map(|release| release.firmware_version.as_str())
+            .collect::<Vec<_>>();
+        versions.sort_unstable();
+        versions.dedup();
+        assert_eq!(
+            versions.len(),
+            total,
+            "firmware versions must be unique so a device register identifies the image"
+        );
+    }
+
+    #[test]
+    fn every_manifest_firmware_image_ships_and_matches_its_digest() {
+        let firmware_dir = repository_firmware_dir();
+        for release in mcu_firmware_manifest().expect("firmware manifest").releases {
+            let path = firmware_dir.join(&release.file_name);
+            assert!(
+                path.is_file(),
+                "firmware manifest references a missing image: {}",
+                path.display()
+            );
+            verify_mcu_firmware_image(&path, &release).unwrap_or_else(|error| {
+                panic!("{} does not match the manifest: {error}", release.file_name)
+            });
+        }
+    }
+
+    #[test]
+    fn payload_contract_requires_every_selectable_firmware_image() {
+        let root = PathBuf::from("/payload/bridge");
+        let firmware_dir = PathBuf::from("/payload/resources/firmware");
+        let required = bridge_payload_required_paths(
+            &root,
+            &PathBuf::from("/payload/bridge/build/graph-host"),
+            &PathBuf::from("/payload/target/release/usb_smoke"),
+            &PathBuf::from("/payload/resources/bitstreams"),
+            &firmware_dir,
+        );
+        assert!(required.contains(&firmware_dir.join("releases.json")));
+        for release in mcu_firmware_releases() {
+            assert!(
+                required.contains(&firmware_dir.join(&release.file_name)),
+                "{} must be part of the payload contract",
+                release.file_name
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_firmware_selection_falls_back_to_the_latest_image() {
+        let latest = default_pxlogic_firmware_id();
+        for stored in ["", "   ", "pxview-0.0.0", "../../etc/passwd"] {
+            let settings = ClientSettings {
+                pxlogic_firmware_id: stored.to_string(),
+                ..ClientSettings::default()
+            }
+            .normalized();
+            assert_eq!(
+                settings.pxlogic_firmware_id, latest,
+                "{stored:?} must normalise back to the latest image"
+            );
+        }
+    }
+
+    #[test]
+    fn a_known_firmware_selection_is_preserved() {
+        let older = mcu_firmware_releases()
+            .into_iter()
+            .find(|release| !release.latest)
+            .expect("at least one older image is offered");
+        let settings = ClientSettings {
+            pxlogic_firmware_id: older.id.clone(),
+            ..ClientSettings::default()
+        }
+        .normalized();
+        assert_eq!(settings.pxlogic_firmware_id, older.id);
+        assert_ne!(settings.pxlogic_firmware_id, default_pxlogic_firmware_id());
+    }
+
+    #[test]
+    fn a_corrupt_firmware_image_is_rejected_before_it_reaches_the_device() {
+        let release = mcu_firmware_releases()
+            .into_iter()
+            .find(|release| release.latest)
+            .expect("latest image");
+        let directory =
+            std::env::temp_dir().join(format!("pxlogic-firmware-verify-{}", std::process::id()));
+        fs::create_dir_all(&directory).expect("temp directory");
+
+        let truncated = directory.join("truncated.bin");
+        fs::write(&truncated, vec![0u8; release.byte_length as usize - 1]).expect("write");
+        let error = verify_mcu_firmware_image(&truncated, &release).expect_err("length mismatch");
+        assert!(error.contains("长度"), "{error}");
+
+        let substituted = directory.join("substituted.bin");
+        fs::write(&substituted, vec![0u8; release.byte_length as usize]).expect("write");
+        let error = verify_mcu_firmware_image(&substituted, &release).expect_err("digest mismatch");
+        assert!(error.contains("SHA-256"), "{error}");
+
+        let genuine = repository_firmware_dir().join(&release.file_name);
+        assert!(verify_mcu_firmware_image(&genuine, &release).is_ok());
+
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]

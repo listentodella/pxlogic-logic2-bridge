@@ -153,7 +153,7 @@ jobs:
             resources/bitstreams/hspi_ddr.bin
             resources/bitstreams/hspi_ddr_RST.bin
             resources/bitstreams/LICENSE.txt
-            resources/firmware/SCI_LOGIC.bin
+            resources/firmware/**
           if-no-files-found: error
           retention-days: 7
 
@@ -542,7 +542,32 @@ jobs:
             | grep -q "arm64"
           test -f "$resources/resources/bitstreams/hspi_ddr.bin"
           test -f "$resources/resources/bitstreams/hspi_ddr_RST.bin"
-          test -f "$resources/resources/firmware/SCI_LOGIC.bin"
+          # Every image the firmware picker offers must be in the bundle,
+          # otherwise a non-default selection cannot be programmed.
+          test -f "$resources/resources/firmware/releases.json"
+          node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const root = path.join(process.argv[1], "resources", "firmware");
+            const manifest = JSON.parse(
+              fs.readFileSync(path.join(root, "releases.json"), "utf8"),
+            );
+            for (const release of manifest.releases) {
+              const image = path.join(root, release.fileName);
+              const bytes = fs.readFileSync(image);
+              if (bytes.length !== release.byteLength) {
+                throw new Error(`${release.fileName} is ${bytes.length} bytes, manifest says ${release.byteLength}`);
+              }
+              const digest = require("node:crypto")
+                .createHash("sha256")
+                .update(bytes)
+                .digest("hex");
+              if (digest !== release.sha256) {
+                throw new Error(`${release.fileName} digest ${digest} does not match the manifest`);
+              }
+              console.log(`bundled firmware ${release.id} ${release.firmwareVersion} ${release.fileName}`);
+            }
+          ' "$resources"
           node tools/logic2-bridge/scripts/verify-macos-release.cjs \
             --mode "${{ steps.signing-mode.outputs.mode }}" \
             --bundle "$app_root"
@@ -807,8 +832,8 @@ jobs:
             (Join-Path $stage 'resources/bitstreams/hspi_ddr_RST.bin')
           Copy-Item 'resources/bitstreams/LICENSE.txt' `
             (Join-Path $stage 'resources/bitstreams/LICENSE.txt')
-          Copy-Item 'resources/firmware/SCI_LOGIC.bin' `
-            (Join-Path $stage 'resources/firmware/SCI_LOGIC.bin')
+          Copy-Item 'resources/firmware/*' `
+            (Join-Path $stage 'resources/firmware') -Recurse
 
           $required = @(
             (Join-Path $stage 'PXLogic Bridge.exe'),
@@ -820,6 +845,7 @@ jobs:
             (Join-Path $stage 'docs/graphserver-profile-manual.md'),
             (Join-Path $stage 'target/release/usb_smoke.exe'),
             (Join-Path $stage 'resources/bitstreams/hspi_ddr.bin'),
+            (Join-Path $stage 'resources/firmware/releases.json'),
             (Join-Path $stage 'resources/firmware/SCI_LOGIC.bin')
           )
           foreach ($path in $required) {

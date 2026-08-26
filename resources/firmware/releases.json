@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "comment": [
+    "Selectable PXLogic CH569 MCU application firmware images.",
+    "Every image is a byte-identical copy of PXView/res/SCI_LOGIC.bin at the",
+    "recorded pxviewCommit (https://github.com/PXLogic/PXView).",
+    "firmwareVersion is the value the image reports through REG_FIRMWARE_VERSION.",
+    "It was cross-checked two ways: decoded from the image itself (the RISC-V",
+    "lui+addi pair that materialises the constant) and read from",
+    "libsigrok/hardware/pxlogic/pxlogic.h #define FIRMWARE_VERSION at the same",
+    "commit. All four agree.",
+    "The FPGA bitstreams are deliberately not selectable: hspi_ddr.bin has been",
+    "byte-identical since PXView 1.4.5 and hspi_ddr_RST.bin since 1.34, so every",
+    "image listed here pairs with the bitstreams already shipped in",
+    "resources/bitstreams."
+  ],
+  "default": "pxview-1.5.1",
+  "releases": [
+    {
+      "id": "pxview-1.5.1",
+      "label": "PXView 1.5.1 – 1.5.8",
+      "firmwareVersion": "0x56900028",
+      "fileName": "SCI_LOGIC.bin",
+      "byteLength": 25804,
+      "sha256": "da9b1e4912d3bc3757aa1d1ef71c4a19971bdc7ab66a6d31a9754fa82769ceaa",
+      "pxviewCommit": "8fb5ebe4d",
+      "released": "2026-06-28",
+      "latest": true,
+      "notes": "Current default. Fixes an out-of-range trigger calculation in the device firmware."
+    },
+    {
+      "id": "pxview-1.4.8",
+      "label": "PXView 1.4.8",
+      "firmwareVersion": "0x56900027",
+      "fileName": "SCI_LOGIC-56900027.bin",
+      "byteLength": 25800,
+      "sha256": "75d1d38a9ea4bddef6bd41637939ee27028b75c86bbf504350fddad1129aa5ae",
+      "pxviewCommit": "0b5b66eb2",
+      "released": "2025-08-18",
+      "latest": false,
+      "notes": "Last 1.4.x firmware."
+    },
+    {
+      "id": "pxview-1.4.7",
+      "label": "PXView 1.4.7",
+      "firmwareVersion": "0x56900026",
+      "fileName": "SCI_LOGIC-56900026.bin",
+      "byteLength": 25800,
+      "sha256": "95bb1e128a4047f03bb8fbc981966bd5ceeeb85818fc20af655929bc1c7387f5",
+      "pxviewCommit": "254e63624",
+      "released": "2025-08-16",
+      "latest": false,
+      "notes": null
+    },
+    {
+      "id": "pxview-1.4.5",
+      "label": "PXView 1.4.5",
+      "firmwareVersion": "0x56900020",
+      "fileName": "SCI_LOGIC-56900020.bin",
+      "byteLength": 25504,
+      "sha256": "134df614af3165a78c430a9880912e27091b23818ca350b6cd961478a490dde2",
+      "pxviewCommit": "67f861f30",
+      "released": "2025-07-14",
+      "latest": false,
+      "notes": "Oldest supported image. Earlier PXView firmware pairs with a different FPGA bitstream and is not offered."
+    }
+  ]
+}

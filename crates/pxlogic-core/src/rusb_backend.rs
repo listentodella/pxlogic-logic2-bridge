@@ -266,12 +266,14 @@ impl RusbBackend {
         let mut handle = self.open_device(device_id)?;
         Self::claim_pxlogic_interfaces(&mut handle)?;
         let previous = Self::read_register(&mut handle, protocol::REG_FIRMWARE_VERSION)?;
+        let firmware_target = protocol::declared_firmware_version(firmware)
+            .unwrap_or(protocol::EXPECTED_FIRMWARE_VERSION);
         trace(
             sink,
             "firmware",
             format!(
-                "programming SCI_LOGIC.bin: current=0x{previous:08x}, target=0x{:08x}",
-                protocol::EXPECTED_FIRMWARE_VERSION
+                "programming MCU firmware ({} bytes): current=0x{previous:08x}, target=0x{firmware_target:08x}",
+                firmware.len()
             ),
         );
 
@@ -342,33 +344,46 @@ impl RusbBackend {
         let mut handle = self.open_device(device_id)?;
         trace(sink, "prepare", "claiming USB interfaces 0 and 1");
         Self::claim_pxlogic_interfaces(&mut handle)?;
+        // Load the selected image first so the device is compared against the
+        // version that would actually be flashed. Hard-coding the expected
+        // version would make a non-default selection be reflashed back to the
+        // default on every prepare. Loading errors stay deferred to the upgrade
+        // branch below, so a device already running the right firmware still
+        // prepares without any firmware resource present.
+        let firmware = Self::load_mcu_firmware();
+        let firmware_target = match firmware.as_ref() {
+            Ok(Some(image)) => protocol::declared_firmware_version(image)
+                .unwrap_or(protocol::EXPECTED_FIRMWARE_VERSION),
+            _ => protocol::EXPECTED_FIRMWARE_VERSION,
+        };
         let firmware_version = Self::read_register(&mut handle, protocol::REG_FIRMWARE_VERSION)?;
-        if firmware_version != protocol::EXPECTED_FIRMWARE_VERSION {
+        if firmware_version != firmware_target {
             trace_warn(
                 sink,
                 "firmware",
                 format!(
-                    "MCU firmware version 0x{firmware_version:08x} differs from PXView expected 0x{:08x}; upgrading before FPGA prepare",
-                    protocol::EXPECTED_FIRMWARE_VERSION,
+                    "MCU firmware version 0x{firmware_version:08x} differs from the selected PXView firmware 0x{firmware_target:08x}; programming it before FPGA prepare"
                 ),
             );
             let _ = handle.release_interface(1);
             let _ = handle.release_interface(0);
             drop(handle);
 
-            let firmware = Self::load_mcu_firmware()?.ok_or_else(|| {
+            let firmware = firmware?.ok_or_else(|| {
                 CoreError::Decode(
                     "MCU firmware is missing; expected resources/firmware/SCI_LOGIC.bin"
                         .to_string(),
                 )
             })?;
             self.flash_mcu_firmware_with_trace(device_id, &firmware, sink)?;
-            handle = self.wait_for_updated_device(device_id, sink)?;
+            handle = self.wait_for_updated_device(device_id, firmware_target, sink)?;
         } else {
             trace(
                 sink,
                 "firmware",
-                format!("MCU firmware version 0x{firmware_version:08x} matches PXView"),
+                format!(
+                    "MCU firmware version 0x{firmware_version:08x} matches the selected PXView firmware"
+                ),
             );
         }
         trace(
@@ -1185,6 +1200,7 @@ impl RusbBackend {
     fn wait_for_updated_device(
         &self,
         device_id: &str,
+        firmware_target: u32,
         sink: &mut TraceSink<'_>,
     ) -> Result<DeviceHandle<Context>> {
         const REENUMERATION_ATTEMPTS: usize = 30;
@@ -1200,14 +1216,13 @@ impl RusbBackend {
             match self.open_device(device_id).and_then(|mut handle| {
                 Self::claim_pxlogic_interfaces(&mut handle)?;
                 let version = Self::read_register(&mut handle, protocol::REG_FIRMWARE_VERSION)?;
-                if version == protocol::EXPECTED_FIRMWARE_VERSION {
+                if version == firmware_target {
                     Ok(handle)
                 } else {
                     let _ = handle.release_interface(1);
                     let _ = handle.release_interface(0);
                     Err(CoreError::Decode(format!(
-                        "MCU re-enumerated with firmware 0x{version:08x}, expected 0x{:08x}",
-                        protocol::EXPECTED_FIRMWARE_VERSION
+                        "MCU re-enumerated with firmware 0x{version:08x}, expected 0x{firmware_target:08x}"
                     )))
                 }
             }) {

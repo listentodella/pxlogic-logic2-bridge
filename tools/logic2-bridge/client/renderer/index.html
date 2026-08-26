@@ -82,7 +82,13 @@
               <option value="fixture-stm32-spi" data-volts="2.2">STM32 SPI 已验证夹具 · 2.2 V</option>
             </select>
           </div>
+          <div>
+            <label for="pxlogic-firmware-version">MCU 固件版本</label>
+            <select id="pxlogic-firmware-version"></select>
+          </div>
         </div>
+
+        <p id="firmware-downgrade-warning" class="firmware-warning" hidden></p>
 
         <div class="threshold-assistance">
           <label class="threshold-verification" for="threshold-verified">
@@ -232,6 +238,23 @@
       <div class="dialog-actions">
         <button id="cancel-experimental-button" class="secondary-button" type="button">取消</button>
         <button id="continue-experimental-button" class="primary-button" type="button" disabled>继续启动</button>
+      </div>
+    </dialog>
+
+    <dialog id="firmware-downgrade-confirmation" class="warning-dialog">
+      <h2>切换到较旧的 MCU 固件？</h2>
+      <p id="firmware-downgrade-message"></p>
+      <p class="dialog-note">
+        下次启动 Bridge 时会重写 PXLogic 的 MCU 固件并让设备重新枚举。该操作无法从 Bridge
+        内部撤销，只能通过再次切换版本重写。请勿在采集进行中或设备供电不稳时切换。
+      </p>
+      <label class="confirmation-check" for="firmware-downgrade-checkbox">
+        <input id="firmware-downgrade-checkbox" type="checkbox">
+        <span>我确认要改写设备固件，并接受降级到未随本版本验证的固件的风险</span>
+      </label>
+      <div class="dialog-actions">
+        <button id="cancel-firmware-downgrade-button" class="secondary-button" type="button">取消</button>
+        <button id="confirm-firmware-downgrade-button" class="primary-button" type="button" disabled>切换固件</button>
       </div>
     </dialog>
 
