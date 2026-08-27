@@ -44,20 +44,25 @@
       </section>
 
       <section class="metric-grid" aria-live="polite">
-        <div class="metric"><span>实际通道</span><strong id="channels">--</strong></div>
+        <div class="metric wide"><span class="label-with-hint"><span class="metric-text">实际通道</span><button
+          class="hint-button" type="button" data-hint="enabled-channels"
+          aria-label="关于实际通道">?</button></span><div id="channel-grid" class="channel-grid"
+          role="img" aria-label="尚未收到通道信息"></div></div>
         <div class="metric"><span class="label-with-hint"><span class="metric-text">Logic 采样率</span><button
           class="hint-button" type="button" data-hint="logic-sample-rate"
           aria-label="关于 Logic 采样率">?</button></span><strong id="logic-rate">--</strong></div>
         <div class="metric"><span class="label-with-hint"><span class="metric-text">硬件有效率</span><button
           class="hint-button" type="button" data-hint="effective-sample-rate"
           aria-label="关于硬件有效率">?</button></span><strong id="effective-rate">--</strong></div>
-        <div class="metric"><span class="label-with-hint"><span class="metric-text">PXView 模式</span><button
-          class="hint-button" type="button" data-hint="pxview-mode"
-          aria-label="关于 PXView 模式">?</button></span><strong id="stream-mode">--</strong></div>
         <div class="metric"><span class="label-with-hint"><span class="metric-text">硬件阈值</span><button
           class="hint-button" type="button" data-hint="threshold"
-          aria-label="关于电压判断阈值">?</button></span><strong id="threshold">--</strong></div>
+          aria-label="关于电压判断阈值">?</button></span><span class="metric-edit"><input id="threshold"
+          type="number" step="0.05" min="0" max="6.668" inputmode="decimal"
+          aria-label="硬件比较器阈值，单位伏"><span class="metric-unit">V</span></span></div>
         <div class="metric"><span>USB 链路</span><strong id="usb-speed">--</strong></div>
+        <div class="metric wide"><span class="label-with-hint"><span class="metric-text">PXView 模式</span><button
+          class="hint-button" type="button" data-hint="pxview-mode"
+          aria-label="关于 PXView 模式">?</button></span><strong id="stream-mode">--</strong></div>
       </section>
 
       <section class="quality-row">
@@ -71,6 +76,7 @@
 
     <footer>
       <button id="main-button" type="button">打开 Bridge</button>
+      <button id="stop-button" class="stop-button" type="button" hidden>停止 Bridge</button>
       <span id="endpoint">WebSocket --</span>
     </footer>
     <script src="hints.js"></script>

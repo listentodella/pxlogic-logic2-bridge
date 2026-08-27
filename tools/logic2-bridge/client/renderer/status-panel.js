@@ -17,10 +17,11 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
     introDismiss: document.querySelector('#panel-intro-dismiss'),
     introDisable: document.querySelector('#panel-intro-disable'),
     main: document.querySelector('#main-button'),
+    stop: document.querySelector('#stop-button'),
     dot: document.querySelector('#state-dot'),
     state: document.querySelector('#state-label'),
     detail: document.querySelector('#state-detail'),
-    channels: document.querySelector('#channels'),
+    channelGrid: document.querySelector('#channel-grid'),
     logicRate: document.querySelector('#logic-rate'),
     effectiveRate: document.querySelector('#effective-rate'),
     mode: document.querySelector('#stream-mode'),
@@ -63,6 +64,51 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
     return hardware?.devices?.find(device => device.id === hardware.selectedDeviceId) || hardware?.devices?.[0];
   }
 
+  // Ported from Logic 2.4.43 app/services/themes/builtin.ts, the same eight colours
+  // Logic 2 paints its own channels with, so a channel is the same colour here as it
+  // is in the waveform the user is looking at. The palette repeats every eight.
+  const CHANNEL_COLORS = [
+    '#d4d4d4', '#C79579', '#FF6D7F', '#FFB45B',
+    '#e8d836', '#58c667', '#53A9FD', '#AF92FB',
+  ];
+  // Logic Pro 16 is what the Bridge presents, so sixteen digital channels is the set
+  // Logic 2 can offer. Kept as a floor rather than a fixed size: should a capture
+  // ever report a higher index, the grid grows to a whole number of rows instead of
+  // quietly omitting an enabled channel.
+  const CHANNEL_GRID_COLUMNS = 8;
+  const CHANNEL_GRID_MINIMUM = 16;
+
+  function channelGridSize(enabled) {
+    const highest = enabled.reduce((top, channel) => Math.max(top, Number(channel) + 1), 0);
+    const needed = Math.max(CHANNEL_GRID_MINIMUM, highest);
+    return Math.ceil(needed / CHANNEL_GRID_COLUMNS) * CHANNEL_GRID_COLUMNS;
+  }
+
+  // Rebuilt only when the channel count changes; the cells themselves are cheap to
+  // re-mark and rebuilding on every telemetry tick would discard nothing useful.
+  function renderChannels(enabled) {
+    const size = channelGridSize(enabled);
+    if (elements.channelGrid.childElementCount !== size) {
+      elements.channelGrid.replaceChildren(...Array.from({ length: size }, (_, index) => {
+        const cell = document.createElement('span');
+        cell.className = 'channel-cell';
+        cell.style.setProperty('--channel-color', CHANNEL_COLORS[index % CHANNEL_COLORS.length]);
+        cell.textContent = String(index);
+        return cell;
+      }));
+    }
+    const on = new Set(enabled.map(Number));
+    for (const [index, cell] of [...elements.channelGrid.children].entries()) {
+      cell.classList.toggle('on', on.has(index));
+    }
+    // The grid is a picture, so the reading of it has to be spelled out for anything
+    // that cannot see colour or position.
+    elements.channelGrid.setAttribute(
+      'aria-label',
+      on.size ? `已启用 ${[...on].sort((a, b) => a - b).map(channel => `D${channel}`).join('、')}` : '未启用任何通道',
+    );
+  }
+
   // The state label already reads 已连接 or 未连接, so this line only carries what
   // the label cannot: an error code from the Bridge or a failed command. Calling
   // it with nothing hides it rather than filling the row with a restatement.
@@ -80,6 +126,11 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
     elements.dot.className = `state-dot ${phase}`;
     elements.state.textContent = state?.message || '待机';
     showProblem(state?.errorCode);
+    // Nothing to stop unless a session is up, and a stale armed button must not
+    // survive the session it was aimed at.
+    const live = phase !== 'stopped' && phase !== 'error';
+    elements.stop.hidden = !live;
+    if (!live) disarmStop();
     elements.endpoint.textContent = state?.actualPort ? `WS ${state.actualPort}` : 'WebSocket --';
     elements.chipDot.className = `state-dot ${phase}`;
     renderChipLabel();
@@ -230,14 +281,110 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
     }
   }
 
+  // The comparator threshold is the one setting the panel can change. It used to be
+  // fixed at launch, so a wrong guess could only be corrected by closing Logic 2 and
+  // losing the capture in it. `appliedThreshold` is what the Bridge is actually using,
+  // kept so a rejected edit can be put back rather than left claiming something else.
+  let appliedThreshold = null;
+
+  function renderThreshold(volts) {
+    appliedThreshold = Number.isFinite(Number(volts)) ? Number(volts) : null;
+    // Never overwrite a value the user is in the middle of typing.
+    if (document.activeElement === elements.threshold) return;
+    elements.threshold.value = appliedThreshold === null ? '' : appliedThreshold.toFixed(3);
+  }
+
+  function setThresholdEditable(capturing) {
+    elements.threshold.disabled = capturing;
+    elements.threshold.title = capturing
+      ? '采集进行中无法修改，请先在 Logic 2 里停止采集'
+      : '修改后在 Logic 2 下一次采集时生效';
+  }
+
+  async function applyThreshold() {
+    const volts = Number(elements.threshold.value);
+    if (!Number.isFinite(volts)) {
+      renderThreshold(appliedThreshold);
+      return;
+    }
+    try {
+      const accepted = await invoke('status_panel_set_threshold', { volts });
+      appliedThreshold = Number(accepted);
+      elements.threshold.value = appliedThreshold.toFixed(3);
+      showProblem('');
+    } catch (error) {
+      // Put back what is actually in force, so the field never claims a threshold the
+      // hardware is not using.
+      renderThreshold(appliedThreshold);
+      showProblem(error?.message || error);
+    }
+  }
+
+  // Stopping the Bridge closes Logic 2, which takes any unsaved capture with it. The
+  // panel floats over Logic 2 and is easy to catch by accident, so the button arms
+  // first and becomes its own confirmation. It disarms on a timer so a click made and
+  // thought better of does not stay loaded indefinitely.
+  const STOP_ARMED_MS = 4000;
+  let stopArmedTimer = 0;
+
+  function disarmStop() {
+    clearTimeout(stopArmedTimer);
+    stopArmedTimer = 0;
+    elements.stop.classList.remove('armed');
+    elements.stop.textContent = '停止 Bridge';
+    elements.stop.title = '关闭 Logic 2 并结束这次 Bridge 会话';
+  }
+
+  function armStop() {
+    elements.stop.classList.add('armed');
+    elements.stop.textContent = '确认停止';
+    elements.stop.title = '再点一次会关闭 Logic 2，未保存的采集数据将会丢失';
+    clearTimeout(stopArmedTimer);
+    stopArmedTimer = setTimeout(disarmStop, STOP_ARMED_MS);
+  }
+
+  async function stopBridge() {
+    if (!elements.stop.classList.contains('armed')) {
+      armStop();
+      return;
+    }
+    disarmStop();
+    try {
+      await invoke('bridge_stop');
+    } catch (error) {
+      showProblem(error?.message || error);
+    }
+  }
+
+  // Logic 2 lowers its own sample rate when the enabled channels make the requested one
+  // impossible, and it does not tell the GraphServer when it does: the rate it last sent
+  // can sit at 500 MHz while its own UI already reads 250 MHz. The Bridge derives the
+  // same clamp from the channel count and the mode table, so the derived value is what
+  // is shown -- otherwise this row contradicts the window it is sitting on top of.
+  //
+  // The request is not thrown away, it moves to the tooltip: knowing the rate was
+  // reduced, and from what, is the difference between a deliberate 250 MHz and a 500 MHz
+  // that quietly did not happen.
+  function renderRates(values) {
+    const requested = Number(values.logicSampleRateHz ?? values.sampleRateHz);
+    const effective = Number(values.pxlogicEffectiveSampleRateHz ?? values.sampleRateHz);
+    const inForce = Number.isFinite(effective) ? effective : requested;
+    elements.logicRate.textContent = formatRate(inForce);
+    const reduced = Number.isFinite(requested) && Number.isFinite(effective) && effective < requested;
+    elements.logicRate.title = reduced
+      ? `Logic 2 请求 ${formatRate(requested)}，启用通道数超出该速率的上限，已降为 ${formatRate(effective)}`
+      : '';
+    elements.logicRate.classList.toggle('reduced', reduced);
+    elements.effectiveRate.textContent = formatRate(effective);
+  }
+
   function renderTelemetry(value) {
     telemetry = value || {};
-    const channels = Array.isArray(telemetry.enabledChannels) ? telemetry.enabledChannels : [];
-    elements.channels.textContent = channels.length ? channels.map(channel => `D${channel}`).join(', ') : '--';
-    elements.logicRate.textContent = formatRate(telemetry.logicSampleRateHz || telemetry.sampleRateHz);
-    elements.effectiveRate.textContent = formatRate(telemetry.pxlogicEffectiveSampleRateHz || telemetry.sampleRateHz);
+    renderChannels(Array.isArray(telemetry.enabledChannels) ? telemetry.enabledChannels : []);
+    renderRates(telemetry);
     elements.mode.textContent = telemetry.pxlogicMode || '--';
-    elements.threshold.textContent = Number.isFinite(telemetry.thresholdVolts) ? `${Number(telemetry.thresholdVolts).toFixed(3)} V` : '--';
+    if (Number.isFinite(Number(telemetry.thresholdVolts))) renderThreshold(telemetry.thresholdVolts);
+    setThresholdEditable(['starting', 'streaming'].includes(String(telemetry.status)));
     elements.usb.textContent = usbLabel(telemetry.pxlogicUsbSpeed || selectedDevice()?.usbSpeed);
     const device = selectedDevice();
     // With no device the identity line has nothing to say, so it says that
@@ -271,7 +418,13 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
 
   elements.hide.addEventListener('click', () => invoke('status_panel_hide'));
   elements.main.addEventListener('click', () => invoke('main_window_show'));
+  elements.stop.addEventListener('click', () => void stopBridge());
+  // Establishes the resting label and its explanation before any state arrives.
+  disarmStop();
   elements.collapse.addEventListener('click', () => setCollapsed(true));
+  // `change` rather than `input`: it fires on blur and Enter, so a half-typed number
+  // is never sent to the hardware.
+  elements.threshold.addEventListener('change', () => void applyThreshold());
   elements.introDismiss.addEventListener('click', () => dismissIntro(false));
   elements.introDisable.addEventListener('click', () => dismissIntro(true));
   // Double-clicking the title area is the habit users bring from every other
@@ -285,10 +438,14 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
   listen('bridge-state', event => renderState(event.payload));
   listen('capture-telemetry', event => renderTelemetry(event.payload));
   listen('status-panel-dock', event => applyDock(event.payload?.bottom));
+  // Either window can change the threshold, and each used to read it once at load
+  // and never hear about the other's change.
+  listen('pxlogic-threshold', event => renderThreshold(event.payload?.volts));
 
   invoke('client_initial_state').then(initial => {
     hardware = initial.hardware;
     applyCollapsed(initial.settings?.statusPanel?.collapsed);
+    renderThreshold(initial.settings?.pxlogicThresholdVolts);
     elements.intro.hidden = Boolean(initial.settings?.guidance?.statusPanelIntroSeen);
     renderState(initial.bridgeState);
     renderTelemetry(initial.captureTelemetry);

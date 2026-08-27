@@ -3,7 +3,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  MAX_HARDWARE_THRESHOLD_VOLTS,
   PxlogicCaptureController,
+  applyBridgeControlCommand,
   bridgeEventLine,
   buildPxlogicHelperArguments,
   buildPxlogicPrepareArguments,
@@ -189,4 +191,49 @@ test('keeps the Bridge hardware threshold independent from Logic UI voltage', ()
   });
   assert.equal(controller.getSessionSettings(4).thresholdVolts, 1.8);
   assert.equal(controller.options.hardwareThresholdVolts, 1.12);
+});
+
+test('the comparator threshold can be retuned without restarting the session', () => {
+  // The threshold was a launch argument only, so a wrong guess could only be corrected
+  // by closing Logic 2 and losing the capture in it -- for a value that can only really
+  // be judged from the decoded result. The helper is handed the threshold when it arms,
+  // so updating the option is the whole change.
+  const controller = { options: { hardwareThresholdVolts: 1.2 } };
+
+  const applied = applyBridgeControlCommand(
+    controller,
+    JSON.stringify({ type: 'set-hardware-threshold', volts: 1.65 }),
+  );
+  assert.equal(controller.options.hardwareThresholdVolts, 1.65);
+  assert.match(applied, /pxlogic-threshold=1\.65 V/);
+  assert.match(applied, /next capture/);
+
+  // Both ends of the hardware's range are usable.
+  applyBridgeControlCommand(controller, JSON.stringify({ type: 'set-hardware-threshold', volts: 0 }));
+  assert.equal(controller.options.hardwareThresholdVolts, 0);
+  applyBridgeControlCommand(
+    controller,
+    JSON.stringify({ type: 'set-hardware-threshold', volts: MAX_HARDWARE_THRESHOLD_VOLTS }),
+  );
+  assert.equal(controller.options.hardwareThresholdVolts, MAX_HARDWARE_THRESHOLD_VOLTS);
+});
+
+test('a bad control command cannot disturb a session that is serving Logic 2', () => {
+  const controller = { options: { hardwareThresholdVolts: 1.65 } };
+  const rejected = [
+    JSON.stringify({ type: 'set-hardware-threshold', volts: MAX_HARDWARE_THRESHOLD_VOLTS + 0.001 }),
+    JSON.stringify({ type: 'set-hardware-threshold', volts: -0.001 }),
+    JSON.stringify({ type: 'set-hardware-threshold', volts: 'high' }),
+    JSON.stringify({ type: 'set-hardware-threshold' }),
+    JSON.stringify({ type: 'shutdown' }),
+    '{ not json',
+    '',
+  ];
+
+  for (const line of rejected) {
+    // Reported rather than thrown, and the threshold in force is left alone.
+    const outcome = applyBridgeControlCommand(controller, line);
+    assert.equal(typeof outcome, 'string');
+    assert.equal(controller.options.hardwareThresholdVolts, 1.65);
+  }
 });

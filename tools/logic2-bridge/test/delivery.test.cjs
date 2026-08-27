@@ -239,6 +239,7 @@ test('renderer settings can never reach disk without the backend-owned merge', (
 
 test('the status panel draws its own chrome and packs the readout tightly', () => {
   const rendererRoot = path.resolve(__dirname, '../client/renderer');
+  const index = fs.readFileSync(path.resolve(__dirname, '../index.cjs'), 'utf8');
   const html = fs.readFileSync(path.join(rendererRoot, 'status-panel.html'), 'utf8');
   const css = fs.readFileSync(path.join(rendererRoot, 'status-panel.css'), 'utf8');
   const script = fs.readFileSync(path.join(rendererRoot, 'status-panel.js'), 'utf8');
@@ -292,6 +293,87 @@ test('the status panel draws its own chrome and packs the readout tightly', () =
   // A 24-character serial cannot share a row with a model name without one of
   // them being cut short, so the identity lines stack.
   assert.match(css, /\.live-device \{[\s\S]*?flex-direction: column;/);
+
+  // Enabled channels are a map, not a sentence. "D0, D1, D2, D3" fitted the cell but
+  // the sixteen channels Logic 2 can offer never will, so the answer was truncated
+  // exactly when it got interesting.
+  assert.match(html, /<div id="channel-grid" class="channel-grid"\s*\n?\s*role="img"/);
+  assert.ok(
+    !html.includes('id="channels"'),
+    'the channel readout is a grid now, not a comma-separated string',
+  );
+  // Logic 2's own palette, so a channel is the same colour here as in the waveform.
+  assert.match(script, /const CHANNEL_COLORS = \[\n\s*'#d4d4d4', '#C79579', '#FF6D7F', '#FFB45B',\n\s*'#e8d836', '#58c667', '#53A9FD', '#AF92FB',\n\s*\];/);
+  // Sixteen is a floor, not a size: a capture reporting a higher index must widen the
+  // grid rather than omit the channel.
+  assert.match(script, /const CHANNEL_GRID_MINIMUM = 16;/);
+  assert.match(script, /Math\.ceil\(needed \/ CHANNEL_GRID_COLUMNS\) \* CHANNEL_GRID_COLUMNS/);
+  // Logic 2 owns channel selection, so the cells must not be pressable.
+  assert.match(script, /document\.createElement\('span'\)/);
+  assert.ok(
+    !/channel-cell[^]*?<button/.test(html),
+    'channel cells report state and must not look like controls',
+  );
+  // The palette is built for Logic 2's dark theme; #d4d4d4 is invisible on white.
+  assert.match(css, /\.channel-grid \{[\s\S]*?background: #22252a;/);
+  // A picture needs its reading spelled out.
+  assert.match(script, /setAttribute\(\n\s*'aria-label',/);
+
+  // The comparator threshold is the one value the panel can change. It was a launch
+  // argument only, so a wrong guess could only be corrected by closing Logic 2 and
+  // losing the capture in it, for a value that can only be judged from the result.
+  assert.match(html, /<input id="threshold"\s*\n?\s*type="number" step="0\.05" min="0" max="6\.668"/);
+  assert.match(script, /invoke\('status_panel_set_threshold', \{ volts \}\)/);
+  // `change` fires on blur and Enter, so a half-typed number never reaches hardware.
+  assert.match(script, /elements\.threshold\.addEventListener\('change'/);
+  // The helper is handed the threshold when it arms, so mid-capture edits could only
+  // ever half-apply.
+  assert.match(script, /setThresholdEditable\(\['starting', 'streaming'\]\.includes/);
+  assert.match(backend, /fn status_panel_set_threshold\(app: AppHandle, volts: f64\)/);
+  // The session had no inbound channel at all, which is why a setting could only be
+  // changed by restarting it. Only the framing lives in the entry point.
+  assert.match(backend, /control: Option<ChildStdin>,/);
+  assert.match(backend, /let control = child\.stdin\.take\(\);/);
+  assert.match(index, /function startControlChannel\(controller\)/);
+  assert.match(index, /applyBridgeControlCommand\(controller, line\)/);
+  assert.match(backend, /"采集进行中，请先在 Logic 2 里停止采集"/);
+  // A rejected edit must not leave the field claiming a threshold that is not in force.
+  assert.match(script, /renderThreshold\(appliedThreshold\);\n\s*showProblem\(/);
+  // Either window can retune it, and each used to read the value once at load and never
+  // hear about the other's change -- with the stale copy in the main window's form
+  // silently putting the old threshold back on its next save. Every settings write
+  // funnels through `store_settings`, so that is where the two are kept in step.
+  assert.match(backend, /"pxlogic-threshold",\n\s*PxlogicThresholdChange \{/);
+  assert.match(script, /listen\('pxlogic-threshold', event => renderThreshold\(event\.payload\?\.volts\)\)/);
+  const mainScript = fs.readFileSync(path.join(rendererRoot, 'app.js'), 'utf8');
+  assert.match(mainScript, /onThreshold: callback => void listen\('pxlogic-threshold'/);
+  assert.match(mainScript, /if \(document\.activeElement === elements\.pxlogicThreshold\) return;/);
+
+  // Stopping the Bridge closes Logic 2 and takes any unsaved capture with it, and the
+  // panel had no way to do it at all: the user had to go back to the main window. It
+  // arms first rather than acting on one click, because this window floats over Logic 2.
+  assert.match(html, /<button id="stop-button" class="stop-button" type="button" hidden>停止 Bridge<\/button>/);
+  assert.match(script, /invoke\('bridge_stop'\)/);
+  assert.match(script, /if \(!elements\.stop\.classList\.contains\('armed'\)\) \{\n\s*armStop\(\);/);
+  assert.match(script, /未保存的采集数据将会丢失/);
+  // A session that ended must not leave an armed button pointed at the next one.
+  assert.match(script, /elements\.stop\.hidden = !live;\n\s*if \(!live\) disarmStop\(\);/);
+  // Shutting a session down closes Logic 2 and the capture helper with it, which does not
+  // always finish inside the grace period; the kill that ends it must not be reported as
+  // a fault.
+  assert.match(backend, /stop_requested: bool,/);
+  assert.match(backend, /runtime\.stop_requested = true;/);
+  assert.match(backend, /runtime\.stop_requested = false;/);
+  assert.match(backend, /\.map\(\|runtime\| runtime\.stop_requested\)/);
+  assert.match(backend, /const BRIDGE_STOP_GRACE: Duration = Duration::from_secs\(10\);/);
+
+  // Logic 2 lowers its own rate when the enabled channels make the request impossible and
+  // does not tell the GraphServer, so the last rate it sent can contradict its own UI. The
+  // derived clamp is displayed instead, with the request kept in the tooltip.
+  assert.match(script, /function renderRates\(values\)/);
+  assert.match(script, /elements\.logicRate\.textContent = formatRate\(inForce\);/);
+  assert.match(script, /elements\.logicRate\.classList\.toggle\('reduced', reduced\)/);
+  assert.match(css, /\.metric strong\.reduced::after \{[\s\S]*?content: "已降频";/);
 
   // The data link is two tight lines in one card rather than a section of its own.
   assert.match(html, /<section class="quality-row">/);

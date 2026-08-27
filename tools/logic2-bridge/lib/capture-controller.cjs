@@ -35,6 +35,40 @@ function emitBridgeEvent(event) {
   console.error(bridgeEventLine(event));
 }
 
+/** Highest comparator threshold the PXLogic hardware accepts. */
+const MAX_HARDWARE_THRESHOLD_VOLTS = 6.668;
+
+/**
+ * Applies one control command from the launcher, returning the line to log.
+ *
+ * The comparator threshold used to be fixed at launch, so correcting it meant closing
+ * Logic 2 and losing whatever had been captured in it -- for a value that can only
+ * really be judged from the decoded result. The capture helper is given the threshold
+ * when it arms, so updating the option is the whole change and the next capture picks
+ * it up; nothing has to be written to the device while it sits idle.
+ *
+ * A bad command is reported and dropped rather than thrown. Nothing the launcher sends
+ * should be able to take down a session that is otherwise serving Logic 2 fine.
+ */
+function applyBridgeControlCommand(controller, line) {
+  let command;
+  try {
+    command = JSON.parse(line);
+  } catch {
+    return `[logic2-bridge:control] ignoring malformed command: ${String(line).slice(0, 80)}`;
+  }
+  if (command?.type !== 'set-hardware-threshold') {
+    return `[logic2-bridge:control] ignoring unknown command: ${String(command?.type)}`;
+  }
+  const volts = Number(command.volts);
+  if (!Number.isFinite(volts) || volts < 0 || volts > MAX_HARDWARE_THRESHOLD_VOLTS) {
+    return `[logic2-bridge:control] rejecting out-of-range threshold: ${String(command.volts)}`;
+  }
+  controller.options.hardwareThresholdVolts = volts;
+  emitBridgeEvent({ type: 'hardware-threshold', thresholdVolts: volts });
+  return `[logic2-bridge:control] pxlogic-threshold=${volts} V (applies to the next capture)`;
+}
+
 function parseThresholdVolts(description) {
   const match = String(description ?? '').match(/[-+]?(?:\d+(?:\.\d*)?|\.\d+)/);
   if (!match) return undefined;
@@ -733,7 +767,9 @@ class PxlogicCaptureController {
 }
 
 module.exports = {
+  MAX_HARDWARE_THRESHOLD_VOLTS,
   PxlogicCaptureController,
+  applyBridgeControlCommand,
   bridgeEventLine,
   buildPxlogicHelperArguments,
   buildPxlogicPrepareArguments,

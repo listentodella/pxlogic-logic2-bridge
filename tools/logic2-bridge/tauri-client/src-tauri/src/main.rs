@@ -5,9 +5,9 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, ChildStdin, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
         Mutex,
@@ -550,12 +550,22 @@ struct ManagedChild {
     token: u64,
     pid: u32,
     child: Child,
+    /// Newline-delimited JSON commands to the running session. The Bridge was
+    /// launch-arguments-only, which meant a setting like the comparator threshold
+    /// could not be changed without restarting Logic 2 and losing the capture.
+    control: Option<ChildStdin>,
 }
 
 #[derive(Default)]
 struct RuntimeState {
     child: Option<ManagedChild>,
     starting: bool,
+    /// Set once a stop has been asked for, so the exit that follows is understood as
+    /// the answer to that request rather than reported as a crash. Shutting the
+    /// session down means closing Logic 2 and the capture helper with it, which does
+    /// not always finish inside the grace period, and the kill that ends it looks
+    /// exactly like a fault from the outside.
+    stop_requested: bool,
 }
 
 struct AppState {
@@ -680,7 +690,24 @@ fn store_settings(app: &AppHandle, settings: ClientSettings) -> Result<ClientSet
     fs::write(&temporary, format!("{contents}\n"))
         .map_err(|error| format!("无法写入配置: {error}"))?;
     fs::rename(&temporary, &path).map_err(|error| format!("无法保存配置: {error}"))?;
+    // Every settings write funnels through here, whichever window made it, so this is
+    // the one place that can keep the two in step. Without it each window reads the
+    // threshold once at load and never hears about the other's change -- and the stale
+    // copy in the main window's form would overwrite a panel edit on its next save.
+    let _ = app.emit(
+        "pxlogic-threshold",
+        PxlogicThresholdChange {
+            volts: settings.pxlogic_threshold_volts,
+        },
+    );
     Ok(settings)
+}
+
+/// Broadcast so both windows show the comparator threshold actually in force.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PxlogicThresholdChange {
+    volts: f64,
 }
 
 #[cfg(target_os = "macos")]
@@ -2362,6 +2389,9 @@ fn apply_capture_runtime_event(
                 telemetry.converted_bytes = value;
             }
         }
+        "hardware-threshold" => {
+            telemetry.threshold_volts = event.threshold_volts.or(telemetry.threshold_volts);
+        }
         "capture-unavailable" => telemetry.status = "error".to_string(),
         _ => return false,
     }
@@ -2386,9 +2416,82 @@ fn apply_pxlogic_plan(telemetry: &mut CaptureTelemetry, event: &BridgeRuntimeEve
         .mode_max_sample_rate_hz
         .or(telemetry.pxlogic_mode_max_sample_rate_hz);
     telemetry.pxlogic_supported = event.supported.or(telemetry.pxlogic_supported);
-    if event.reason.is_some() {
+    // `supported` is what marks an event as carrying a verdict, so the reason that
+    // came with it is the current truth even when it is absent. Keeping a reason
+    // until another one replaced it left the panel warning about a combination that
+    // no longer existed: Logic 2 lowers the sample rate by itself once enough
+    // channels are enabled for the hardware to refuse the request, and it sends the
+    // channel change first, so the rejected plan is always followed a moment later by
+    // one that works.
+    if event.supported.is_some() {
         telemetry.pxlogic_reason.clone_from(&event.reason);
     }
+}
+
+/// Sends one newline-delimited JSON command to the running session.
+///
+/// Returns an error when no session is running rather than silently succeeding: the
+/// caller is changing a hardware setting and has to know it did not land.
+fn send_bridge_control(app: &AppHandle, command: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut runtime = state
+        .runtime
+        .lock()
+        .map_err(|_| "Bridge 运行状态不可用".to_string())?;
+    let child = runtime
+        .child
+        .as_mut()
+        .ok_or_else(|| "Bridge 未在运行".to_string())?;
+    let control = child
+        .control
+        .as_mut()
+        .ok_or_else(|| "该 Bridge 会话不支持在线修改".to_string())?;
+    control
+        .write_all(format!("{command}\n").as_bytes())
+        .and_then(|()| control.flush())
+        .map_err(|error| format!("无法发送指令到 Bridge: {error}"))
+}
+
+/// Retunes the hardware comparator without restarting Logic 2.
+///
+/// The threshold used to be a launch argument only, so correcting it meant closing
+/// Logic 2 and losing the capture in it -- for a value that can only really be judged
+/// by looking at the decoded result. The helper receives it per capture, so a change
+/// between captures needs no register write and takes effect on the next one; that is
+/// also why this refuses while a capture is running rather than half-applying.
+#[tauri::command]
+fn status_panel_set_threshold(app: AppHandle, volts: f64) -> Result<f64, String> {
+    if !volts.is_finite() || !(0.0..=MAX_PXLOGIC_THRESHOLD_VOLTS).contains(&volts) {
+        return Err(format!(
+            "阈值需在 0 至 {MAX_PXLOGIC_THRESHOLD_VOLTS} V 之间"
+        ));
+    }
+    let capturing = app
+        .state::<AppState>()
+        .capture_telemetry
+        .lock()
+        .ok()
+        .is_some_and(|telemetry| matches!(telemetry.status.as_str(), "starting" | "streaming"));
+    if capturing {
+        return Err("采集进行中，请先在 Logic 2 里停止采集".to_string());
+    }
+    send_bridge_control(
+        &app,
+        &format!(r#"{{"type":"set-hardware-threshold","volts":{volts}}}"#),
+    )?;
+    let mut settings = load_settings(&app);
+    settings.pxlogic_threshold_volts = volts;
+    // The stored profile was verified against the old value, so its verification no
+    // longer says anything about this one.
+    if let Some(profile) = settings
+        .pxlogic_threshold_profiles
+        .get_mut(&settings.pxlogic_device_id.clone())
+    {
+        profile.volts = volts;
+        profile.verified = false;
+    }
+    store_settings(&app, settings)?;
+    Ok(volts)
 }
 
 fn append_log(app: &AppHandle, source: &str, line: &str) {
@@ -2554,7 +2657,13 @@ fn monitor_bridge(app: AppHandle, token: u64) {
         };
         match result {
             Some(result) => {
-                let quitting = app.state::<AppState>().quitting.load(Ordering::Acquire);
+                let quitting = app.state::<AppState>().quitting.load(Ordering::Acquire)
+                    || app
+                        .state::<AppState>()
+                        .runtime
+                        .lock()
+                        .map(|runtime| runtime.stop_requested)
+                        .unwrap_or(false);
                 let graph_analyzer_cleanup_crash = app
                     .state::<AppState>()
                     .bridge_state
@@ -2666,6 +2775,13 @@ fn terminate_process(_pid: u32, _force: bool) -> Result<(), String> {
     Err("当前平台尚未实现 bridge 进程组终止".to_string())
 }
 
+/// How long a session gets to shut down before it is killed.
+///
+/// Its own shutdown closes the Logic 2 window, stops the capture helper and ends the
+/// native GraphServer host, and three seconds was not enough for that: the kill
+/// landed mid-cleanup, which is how orphaned hosts and windows are left behind.
+const BRIDGE_STOP_GRACE: Duration = Duration::from_secs(10);
+
 fn request_stop(app: &AppHandle) -> Result<BridgeState, String> {
     let child = {
         let state = app.state::<AppState>();
@@ -2694,12 +2810,15 @@ fn request_stop(app: &AppHandle) -> Result<BridgeState, String> {
         recovery_action: None,
     };
     update_bridge_state(app, next.clone());
+    if let Ok(mut runtime) = app.state::<AppState>().runtime.lock() {
+        runtime.stop_requested = true;
+    }
     terminate_process(pid, false)
         .map_err(|error| format!("无法停止 Bridge 进程 {pid}: {error}"))?;
 
     let app_for_timeout = app.clone();
     thread::spawn(move || {
-        thread::sleep(Duration::from_secs(3));
+        thread::sleep(BRIDGE_STOP_GRACE);
         let still_running = app_for_timeout
             .state::<AppState>()
             .runtime
@@ -4059,7 +4178,7 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
         ])
         .current_dir(&payload.bridge_root)
         .env("ELECTRON_RUN_AS_NODE", "1")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if settings.maximize_logic_window {
@@ -4083,6 +4202,7 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
     let mut child = command
         .spawn()
         .map_err(|error| format!("无法通过 Logic 内置 Node 启动 Bridge: {error}"))?;
+    let control = child.stdin.take();
     let stdout = child
         .stdout
         .take()
@@ -4103,7 +4223,13 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
             .lock()
             .map_err(|_| "Bridge 进程状态已损坏".to_string())?;
         runtime.starting = false;
-        runtime.child = Some(ManagedChild { token, pid, child });
+        runtime.stop_requested = false;
+        runtime.child = Some(ManagedChild {
+            token,
+            pid,
+            control,
+            child,
+        });
     }
     let previous_session_logs = if let Ok(mut logs) = app.state::<AppState>().logs.lock() {
         let previous = logs.iter().cloned().collect::<Vec<_>>();
@@ -4495,6 +4621,7 @@ fn main() {
             status_panel_end_move,
             status_panel_dock_edge,
             status_panel_fit_height,
+            status_panel_set_threshold,
             status_panel_intro_acknowledge,
             status_panel_set_auto_show,
             onboarding_complete,
@@ -5392,6 +5519,54 @@ mod tests {
         assert_eq!(telemetry.pxlogic_effective_sample_rate_hz, Some(50_000_000));
         assert_eq!(telemetry.pxlogic_mode_max_sample_rate_hz, Some(500_000_000));
         assert_eq!(telemetry.pxlogic_supported, Some(true));
+    }
+
+    #[test]
+    fn a_logic_rate_downgrade_replaces_the_plan_it_invalidated() {
+        // Logic 2 drops the sample rate on its own once enough channels are enabled
+        // for the hardware to refuse the combination, and it sends the channel change
+        // first and the new rate about a millisecond later. The middle step is
+        // therefore always a plan the hardware cannot serve, and none of it may
+        // survive into the plan that follows.
+        let plan = |json: &str| parse_bridge_runtime_event(json).unwrap();
+        let mut telemetry = CaptureTelemetry::default();
+
+        // Four channels at 500 MHz: the fastest mode, and fine.
+        assert!(apply_capture_runtime_event(
+            &mut telemetry,
+            &plan(
+                r#"[logic2-bridge:event] {"type":"capture-plan","logicSampleRateHz":500000000,"enabledChannels":[0,1,2,3],"channelSpan":4,"mode":"STREAM_LOGIC500x4","modePhysicalChannels":4,"effectiveSampleRateHz":500000000,"modeMaxSampleRateHz":500000000,"supported":true,"reason":null}"#
+            )
+        ));
+        assert_eq!(telemetry.pxlogic_mode.as_deref(), Some("STREAM_LOGIC500x4"));
+        assert_eq!(telemetry.pxlogic_supported, Some(true));
+
+        // Four more channels arrive while the rate is still 500 MHz.
+        assert!(apply_capture_runtime_event(
+            &mut telemetry,
+            &plan(
+                r#"[logic2-bridge:event] {"type":"capture-plan","logicSampleRateHz":500000000,"enabledChannels":[0,1,2,3,4,5,6,7],"channelSpan":8,"mode":"STREAM_LOGIC250x8","modePhysicalChannels":8,"effectiveSampleRateHz":250000000,"modeMaxSampleRateHz":250000000,"supported":false,"reason":"请求采样率超过 STREAM_LOGIC250x8 上限"}"#
+            )
+        ));
+        assert_eq!(telemetry.pxlogic_supported, Some(false));
+        assert!(telemetry.pxlogic_reason.is_some());
+
+        // Logic settles on 250 MHz, which the hardware can serve.
+        assert!(apply_capture_runtime_event(
+            &mut telemetry,
+            &plan(
+                r#"[logic2-bridge:event] {"type":"capture-plan","logicSampleRateHz":250000000,"enabledChannels":[0,1,2,3,4,5,6,7],"channelSpan":8,"mode":"STREAM_LOGIC250x8","modePhysicalChannels":8,"effectiveSampleRateHz":250000000,"modeMaxSampleRateHz":250000000,"supported":true,"reason":null}"#
+            )
+        ));
+        assert_eq!(telemetry.logic_sample_rate_hz, Some(250_000_000));
+        assert_eq!(
+            telemetry.pxlogic_effective_sample_rate_hz,
+            Some(250_000_000)
+        );
+        assert_eq!(telemetry.enabled_channels, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(telemetry.pxlogic_supported, Some(true));
+        // The warning belonged to a plan that no longer exists.
+        assert_eq!(telemetry.pxlogic_reason, None);
     }
 
     #[test]

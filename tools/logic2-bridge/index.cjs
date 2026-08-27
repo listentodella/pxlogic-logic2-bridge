@@ -8,6 +8,7 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const {
   PxlogicCaptureController,
+  applyBridgeControlCommand,
   bridgeEventLine,
   createLineReader,
   preparePxlogicDevice,
@@ -857,6 +858,35 @@ async function waitForExit(child) {
   });
 }
 
+/**
+ * Newline-delimited JSON commands from the launcher on stdin.
+ *
+ * Everything about a session used to be fixed at launch, so correcting the comparator
+ * threshold meant closing Logic 2 and losing whatever had been captured in it -- for a
+ * value that can only really be judged from the decoded result.
+ *
+ * Only the framing lives here; what a command means belongs with the controller that
+ * owns the setting, and is unit-tested there.
+ */
+function startControlChannel(controller) {
+  let buffered = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', chunk => {
+    buffered += chunk;
+    let newline = buffered.indexOf('\n');
+    while (newline >= 0) {
+      const line = buffered.slice(0, newline).trim();
+      buffered = buffered.slice(newline + 1);
+      newline = buffered.indexOf('\n');
+      const outcome = line ? applyBridgeControlCommand(controller, line) : null;
+      if (outcome) console.error(outcome);
+    }
+  });
+  // The launcher closing its end is not an error; the session keeps serving Logic 2.
+  process.stdin.on('error', () => {});
+  process.stdin.resume();
+}
+
 async function main() {
   const options = parseArguments(process.argv.slice(2));
   if (options.help) {
@@ -994,6 +1024,7 @@ async function main() {
       startupTimeoutMs,
     );
     controller = new PxlogicCaptureController(options, host);
+    startControlChannel(controller);
     const graphActionGuard = new GraphActionGuard();
     proxy = await startWebSocketProxy({
       port: options.port,

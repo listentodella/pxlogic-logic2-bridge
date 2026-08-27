@@ -28,6 +28,7 @@ function createTauriApi() {
     onState: callback => void listen('bridge-state', event => callback(event.payload)),
     onTelemetry: callback => void listen('capture-telemetry', event => callback(event.payload)),
     onLog: callback => void listen('bridge-log', event => callback(event.payload)),
+    onThreshold: callback => void listen('pxlogic-threshold', event => callback(event.payload)),
   };
 }
 
@@ -1230,6 +1231,21 @@ elements.startButton.addEventListener('click', async () => {
   }
 });
 
+// The status panel can retune the comparator threshold while Logic 2 stays open, so
+// this form must not keep the value it read at startup: saving anything else here
+// would silently put the old threshold back.
+if (typeof api.onThreshold === 'function') {
+  api.onThreshold(payload => {
+    const volts = Number(payload?.volts);
+    if (!Number.isFinite(volts)) return;
+    const deviceId = elements.pxlogicDevice.value;
+    if (deviceId && thresholdProfiles[deviceId]) thresholdProfiles[deviceId].volts = volts;
+    // Never overwrite a value being typed here.
+    if (document.activeElement === elements.pxlogicThreshold) return;
+    elements.pxlogicThreshold.value = String(volts);
+    renderThresholdGuidance();
+  });
+}
 api.onState(renderState);
 if (typeof api.onTelemetry === 'function') api.onTelemetry(renderTelemetry);
 api.onLog(appendLog);

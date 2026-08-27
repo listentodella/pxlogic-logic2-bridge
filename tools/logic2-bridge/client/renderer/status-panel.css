@@ -171,6 +171,99 @@ main { padding: 12px 14px 10px; }
 .metric span { margin-bottom: 3px; color: #7a7f87; font-size: 10px; }
 .metric strong { color: #30343a; font-size: 12px; font-weight: 650; }
 
+/* A rate Logic 2 asked for and could not have. Marked rather than silently swapped, so
+   a deliberate 250 MHz is distinguishable from a 500 MHz that quietly did not happen;
+   the tooltip carries what was requested. */
+.metric strong.reduced { color: #9a5b18; }
+.metric strong.reduced::after {
+  margin-left: 4px;
+  color: #b0783a;
+  content: "已降频";
+  font-size: 9px;
+  font-weight: 600;
+}
+
+/* Spans both columns. The channel grid needs the full width to stay legible, and
+   the PXView mode string is long enough that half a 340 px panel truncated it. */
+.metric.wide { grid-column: 1 / -1; }
+
+/* The one value the panel can change. The comparator threshold can only really be
+   judged from the decoded result, and it used to be fixed at launch, so a wrong guess
+   cost whatever Logic 2 had captured. It has to read as adjustable without turning a
+   compact readout into a form: the same type as its neighbours, with a border that
+   only asserts itself on hover and focus. */
+/* Qualified like `.metric span.label-with-hint` above: `.metric span` sets
+   `display: block`, which otherwise wins and drops the unit onto its own line. */
+.metric span.metric-edit { display: flex; align-items: baseline; gap: 4px; min-width: 0; }
+
+.metric-edit input {
+  /* Flexible rather than full-width, or the unit beside it is pushed onto its own
+     line and the row grows for nothing. */
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1px 4px;
+  color: #30343a;
+  background: #fff;
+  border: 1px solid #cdd2d8;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-edit input:hover:not(:disabled) { border-color: #9aa1aa; }
+.metric-edit input:focus { border-color: #4a6ea8; outline: none; }
+/* Disabled while a capture runs: the helper is given the threshold when it arms, so
+   changing it mid-capture could only ever half-apply. */
+.metric-edit input:disabled { color: #8b9098; background: #f2f3f5; }
+/* Spinners cost more width than they are worth here; arrow keys still step. */
+.metric-edit input::-webkit-inner-spin-button,
+.metric-edit input::-webkit-outer-spin-button { margin: 0; -webkit-appearance: none; }
+
+.metric span.metric-unit { display: inline; flex: 0 0 auto; color: #7a7f87; font-size: 11px; }
+
+/* A map rather than a list of names. "D0, D1, D2, D3" fits; the sixteen channels
+   Logic 2 can offer do not, and the cell truncated exactly when the answer got
+   interesting. Eight per row matches the colour palette's period, so a column is
+   always one colour.
+
+   The surface is dark because the palette is: these are Logic 2's own channel
+   colours, chosen against its dark theme, and the lightest of them (#d4d4d4 for
+   channel 0) is invisible on white. Reading the grid as one dark inset also stops
+   sixteen little cells looking like sixteen little buttons. */
+.channel-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 3px;
+  margin-top: 2px;
+  padding: 4px;
+  background: #22252a;
+  border-radius: 4px;
+}
+
+/* Not buttons: Logic 2 owns channel selection and the panel only reports it, so
+   these must not look or behave like something to press. */
+.channel-cell {
+  padding: 2px 0;
+  color: var(--channel-color);
+  background: #2c3037;
+  border: 1px solid #3a3d43;
+  border-radius: 3px;
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.channel-cell.on {
+  color: #141415;
+  background: var(--channel-color);
+  border-color: var(--channel-color);
+}
+
 /* A metric label that carries a `?` affordance keeps the ellipsis on the text
    itself so the button is never clipped by the narrow panel. */
 .metric span.label-with-hint { display: flex; align-items: center; gap: 4px; overflow: visible; }
@@ -227,6 +320,18 @@ footer { display: flex; align-items: center; gap: 10px; padding: 0 14px 12px; }
 footer button { min-height: 28px; padding: 0 11px; color: #3f444b; background: #fff; border: 1px solid #c8cdd4; border-radius: 4px; font-size: 11px; }
 footer button:hover { border-color: #777e87; }
 footer span { margin-left: auto; overflow: hidden; color: #858a92; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Stopping the Bridge closes Logic 2 and takes any unsaved capture with it, and this
+   is a small always-on-top window that is easy to catch by accident. The button
+   therefore arms first: one click turns it into its own confirmation, which is
+   compact enough for a 340 px panel where a modal dialog would not be. */
+footer .stop-button[hidden] { display: none; }
+footer .stop-button.armed {
+  color: #fff;
+  background: #b3392f;
+  border-color: #93291f;
+}
+footer .stop-button.armed:hover { background: #c2402f; }
 
 /* Collapsed shape: the whole window is one button. A small icon inside a bar was
    the previous design and it was too fiddly to hit, which defeated the point of
