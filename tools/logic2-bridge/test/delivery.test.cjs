@@ -553,6 +553,33 @@ test('a running Logic window blocks the start instead of being reattached', () =
   assert.match(proxy, /if \(error\.code === 'EADDRINUSE' && requestedPort !== 0 && !retriedWithAutomaticPort\)/);
 });
 
+test('a Logic request cannot silence the session it was sent through', () => {
+  const bridgeRoot = path.resolve(__dirname, '..');
+  const proxy = fs.readFileSync(path.join(bridgeRoot, 'lib/websocket-proxy.cjs'), 'utf8');
+  const controller = fs.readFileSync(path.join(bridgeRoot, 'lib/capture-controller.cjs'), 'utf8');
+
+  // The observer runs before the message is relayed so that a StartCapture arriving
+  // behind a channel change is served with the new configuration. That makes it the one
+  // thing able to take the connection down: a rejection left the forwarding chain
+  // permanently rejected, every later frame queued behind it with `.then` never ran, and
+  // the proxy went on reading from Logic 2 while forwarding nothing -- silently. Logic
+  // 2's controls appeared dead, because its buttons only move once the GraphServer
+  // confirms the change.
+  assert.match(proxy, /const transformed = await withTimeout\(/);
+  assert.match(proxy, /observer failed, relaying message unchanged/);
+  assert.match(proxy, /observer did not settle within/);
+
+  // Clearing every digital channel is one click of Logic 2's Clear button. There is no
+  // stream mode for zero lanes, and resolving one throws.
+  assert.match(controller, /if \(settings\.enabledChannels\.length === 0\) \{[\s\S]*?reason: '未启用任何数字通道',/);
+
+  // `done` is what the controller awaits when it tears a capture down, so it has to
+  // settle on every path; it used to be resolved only after an unbounded post-mortem
+  // scan, and a stall there left the observer waiting forever.
+  assert.match(controller, /\} finally \{\n\s*resolveDone\(\{ code, failure \}\);/);
+  assert.match(controller, /PXLogic stop before start failed/);
+});
+
 test('the launcher confirms before closing a running Logic window', () => {
   const rendererRoot = path.resolve(__dirname, '../client/renderer');
   const html = fs.readFileSync(path.join(rendererRoot, 'index.html'), 'utf8');

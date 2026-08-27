@@ -61,10 +61,36 @@ function encodeMaskedTextFrame(text) {
   return frame;
 }
 
+/// How long the observer gets before its message is relayed without it. Generous,
+/// because the observer legitimately does work; bounded, because a wait with no end
+/// stalls every message queued behind it.
+const OBSERVER_TIMEOUT_MS = 5000;
+
+function withTimeout(promise, milliseconds) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`observer did not settle within ${milliseconds} ms`)),
+        milliseconds,
+      );
+      timer.unref?.();
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 class ClientFrameRelay {
-  constructor(upstream, observeText) {
+  constructor(
+    upstream,
+    observeText,
+    log = message => console.error(message),
+    observerTimeoutMs = OBSERVER_TIMEOUT_MS,
+  ) {
     this.upstream = upstream;
     this.observeText = observeText;
+    this.log = log;
+    this.observerTimeoutMs = observerTimeoutMs;
     this.buffer = Buffer.alloc(0);
     this.forwarding = Promise.resolve();
     this.fragmentText = null;
@@ -126,9 +152,33 @@ class ClientFrameRelay {
       this.forwarding = this.forwarding.then(async () => {
         let forwardedFrames = frames;
         if (textMessage.complete) {
-          const transformed = await this.observeText(textMessage.text);
-          if (typeof transformed === 'string' && transformed !== textMessage.text) {
-            forwardedFrames = [encodeMaskedTextFrame(transformed)];
+          // The observer is deliberately awaited before the message is relayed: it
+          // records the channel and rate settings that a StartCapture arriving right
+          // behind it will be served with, so running it late would arm a capture from
+          // the previous configuration.
+          //
+          // That makes it the one thing in this chain that must never take the
+          // connection down with it. A rejection here used to leave `this.forwarding`
+          // permanently rejected, and because every later frame is queued behind it
+          // with `.then`, none of them ever ran: the proxy went on reading from Logic 2
+          // and forwarding nothing at all, with no error anywhere. What the user sees
+          // is Logic 2's controls going dead, since its buttons only move once the
+          // GraphServer confirms the change. A hang is just as fatal and just as
+          // silent, so the wait is bounded as well as guarded.
+          try {
+            const transformed = await withTimeout(
+              this.observeText(textMessage.text),
+              this.observerTimeoutMs,
+            );
+            if (typeof transformed === 'string' && transformed !== textMessage.text) {
+              forwardedFrames = [encodeMaskedTextFrame(transformed)];
+            }
+          } catch (error) {
+            // Relayed unchanged: a message the observer could not process is still a
+            // message the GraphServer is waiting for.
+            this.log(
+              `[logic2-bridge:proxy] observer failed, relaying message unchanged: ${error.message}`,
+            );
           }
         }
         for (const forwarded of forwardedFrames) {
@@ -136,8 +186,8 @@ class ClientFrameRelay {
         }
       });
     }
-    // finish() retains the rejected promise for orderly shutdown; this handler
-    // prevents an early unhandled-rejection report before the socket closes.
+    // A write failing is the socket going away, which the socket's own handlers deal
+    // with; it must not be left as an unhandled rejection in the meantime.
     this.forwarding.catch(() => {});
     return true;
   }
@@ -191,7 +241,7 @@ function removeCompressionOffer(header) {
   return header.replace(/^Sec-WebSocket-Extensions:[^\r\n]*\r\n/gim, '');
 }
 
-function startWebSocketProxy({ port, backendPort, observeText }) {
+function startWebSocketProxy({ port, backendPort, observeText, log }) {
   const connections = new Set();
   const server = net.createServer(client => {
     const upstream = net.createConnection({ host: '127.0.0.1', port: backendPort });
@@ -232,7 +282,7 @@ function startWebSocketProxy({ port, backendPort, observeText }) {
           const header = removeCompressionOffer(handshake.subarray(0, headerEnd).toString('latin1'));
           upstream.write(Buffer.from(header, 'latin1'));
           upgraded = true;
-          relay = new ClientFrameRelay(upstream, observeText);
+          relay = new ClientFrameRelay(upstream, observeText, log);
           const remaining = handshake.subarray(headerEnd);
           handshake = Buffer.alloc(0);
           if (remaining.length) relay.push(remaining);

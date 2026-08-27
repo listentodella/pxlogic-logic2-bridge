@@ -524,24 +524,35 @@ function startPxlogicFeeder(options, host, captureSettings) {
     if (host.exitCode === null) host.kill('SIGTERM');
   });
   helper.once('close', async code => {
-    host.stdin.removeListener('drain', resumeStdout);
-    if (!host.stdin.destroyed) {
-      host.stdin.write(createInjectionFrame(INJECTION_FRAME.END));
+    // `done` is what `stop()` hands back and what the controller awaits, so it has to
+    // settle on every path out of here. It used to be resolved only at the end: a throw
+    // or a stall anywhere above -- writing to a closed host, or the post-mortem USB scan
+    // taking its time -- left it pending forever, and the caller waiting on it never
+    // returned. Since that caller is the proxy's observer, the whole session stopped
+    // relaying.
+    try {
+      host.stdin.removeListener('drain', resumeStdout);
+      if (!host.stdin.destroyed) {
+        host.stdin.write(createInjectionFrame(INJECTION_FRAME.END));
+      }
+      console.error(
+        `[logic2-bridge:pxlogic] helper exited code=${code} chunks=${crossChunks} bytes=${convertedBytes}`,
+      );
+      if (!stopRequested && code !== 0 && !failure) {
+        failure = await diagnosePxlogicHelperExit(options, code);
+      }
+      emitBridgeEvent({
+        type: 'capture-ended',
+        status: failure ? 'error' : 'stopped',
+        crossChunks,
+        convertedBytes,
+        failed: Boolean(failure),
+      });
+    } catch (error) {
+      console.error(`[logic2-bridge:pxlogic] capture teardown failed: ${error.message}`);
+    } finally {
+      resolveDone({ code, failure });
     }
-    console.error(
-      `[logic2-bridge:pxlogic] helper exited code=${code} chunks=${crossChunks} bytes=${convertedBytes}`,
-    );
-    if (!stopRequested && code !== 0 && !failure) {
-      failure = await diagnosePxlogicHelperExit(options, code);
-    }
-    emitBridgeEvent({
-      type: 'capture-ended',
-      status: failure ? 'error' : 'stopped',
-      crossChunks,
-      convertedBytes,
-      failed: Boolean(failure),
-    });
-    resolveDone({ code, failure });
   });
 
   console.error(
@@ -575,6 +586,27 @@ class PxlogicCaptureController {
   }
 
   emitCapturePlan(sessionId, settings) {
+    // Clearing every digital channel is one click of Logic 2's Clear button, and a
+    // perfectly ordinary state to pass through on the way to another selection. There
+    // is no stream mode for zero lanes though, and asking for one throws: the plan is
+    // descriptive, so it reports the empty selection instead of raising. Letting that
+    // exception out cost the whole session -- it escapes the proxy's observer, which
+    // permanently rejects the forwarding chain, and from then on every message from
+    // Logic 2 is read and discarded. What the user sees is the channel buttons going
+    // dead, because they only move once the GraphServer confirms the change.
+    if (settings.enabledChannels.length === 0) {
+      emitBridgeEvent({
+        type: 'capture-plan',
+        sessionId: sessionId ?? 'default',
+        logicSampleRateHz: settings.sampleRateHz,
+        enabledChannels: [],
+        pxlogicUsbSpeed: this.options.pxlogicUsbSpeed,
+        pxlogicLogicMode: this.options.pxlogicLogicMode,
+        supported: false,
+        reason: '未启用任何数字通道',
+      });
+      return;
+    }
     const plan = resolvePxlogicStreamPlan({
       usbSpeed: this.options.pxlogicUsbSpeed,
       logicMode: this.options.pxlogicLogicMode,
@@ -667,7 +699,18 @@ class PxlogicCaptureController {
   }
 
   async startCapture(sessionId) {
-    if (this.activeFeeder) await this.stopCapture(this.activeSessionId);
+    // Guarded like the sibling call in `observeRequest`: a failure clearing the
+    // previous capture must not escape into the proxy's observer, where it would
+    // reject the forwarding chain and silence the session.
+    if (this.activeFeeder) {
+      try {
+        await this.stopCapture(this.activeSessionId);
+      } catch (error) {
+        console.error(`[logic2-bridge:control] PXLogic stop before start failed: ${error.message}`);
+        this.activeFeeder = null;
+        this.activeSessionId = undefined;
+      }
+    }
     if (this.captureUnavailableReason) {
       console.error(
         `[logic2-bridge:control] refusing capture: ${this.captureUnavailableReason}; ` +

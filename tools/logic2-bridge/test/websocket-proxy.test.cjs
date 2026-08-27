@@ -129,3 +129,56 @@ test('falls back when the requested public port is occupied', async () => {
     occupied.close(error => error ? reject(error) : resolve());
   });
 });
+
+test('an observer failure costs its own message and nothing else', async () => {
+  // The observer runs before the message is relayed, so that a StartCapture arriving
+  // behind a channel change is served with the new configuration. That made it the one
+  // thing able to take the connection down: a rejection left the forwarding chain
+  // permanently rejected, every later frame was queued behind it with `.then` and none
+  // of them ever ran. The proxy went on reading from Logic 2 and forwarding nothing,
+  // with no error anywhere, and Logic 2's controls went dead -- its buttons only move
+  // once the GraphServer confirms the change.
+  const upstream = new FakeSocket();
+  const complaints = [];
+  const relay = new ClientFrameRelay(
+    upstream,
+    async text => {
+      if (text === 'boom') throw new Error('observer exploded');
+      return undefined;
+    },
+    message => complaints.push(message),
+  );
+
+  for (const text of ['first', 'boom', 'second', 'third']) {
+    relay.push(maskedTextFrame(text));
+  }
+  await relay.forwarding;
+
+  // The failing message is still relayed: the GraphServer is waiting for it either way.
+  assert.deepEqual(upstream.frames.map(decodeTextFrame), ['first', 'boom', 'second', 'third']);
+  assert.equal(complaints.length, 1);
+  assert.match(complaints[0], /observer failed, relaying message unchanged: observer exploded/);
+});
+
+test('an observer that never settles cannot stall the messages behind it', async () => {
+  // A hang is as fatal as a throw and just as quiet, so the wait is bounded too. The
+  // teardown path that produced one in practice awaited a post-mortem USB scan with no
+  // timeout while the forwarding chain waited on it.
+  const upstream = new FakeSocket();
+  const complaints = [];
+  const relay = new ClientFrameRelay(
+    upstream,
+    text => (text === 'hang' ? new Promise(() => {}) : Promise.resolve(undefined)),
+    message => complaints.push(message),
+    25,
+  );
+
+  relay.push(maskedTextFrame('before'));
+  relay.push(maskedTextFrame('hang'));
+  relay.push(maskedTextFrame('after'));
+  await relay.forwarding;
+
+  assert.deepEqual(upstream.frames.map(decodeTextFrame), ['before', 'hang', 'after']);
+  assert.equal(complaints.length, 1);
+  assert.match(complaints[0], /did not settle within \d+ ms/);
+});

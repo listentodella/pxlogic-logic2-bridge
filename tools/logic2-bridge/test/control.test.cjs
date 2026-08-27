@@ -237,3 +237,60 @@ test('a bad control command cannot disturb a session that is serving Logic 2', (
     assert.equal(controller.options.hardwareThresholdVolts, 1.65);
   }
 });
+
+test('clearing every channel in Logic 2 is a state, not a fault', () => {
+  // Logic 2's Clear button empties the digital selection, which is an ordinary state to
+  // pass through on the way to another one. There is no stream mode for zero lanes and
+  // resolving one throws, and that exception used to escape into the proxy's observer,
+  // permanently rejecting its forwarding chain: from then on every message from Logic 2
+  // was read and discarded. The visible symptom was the channel buttons going dead,
+  // because they only move once the GraphServer confirms the change.
+  const lines = [];
+  const controller = new PxlogicCaptureController(
+    {
+      enabledChannels: [0, 1, 2, 3],
+      sampleRateHz: 500_000_000,
+      thresholdVolts: 1.8,
+      pxlogicUsbSpeed: 'super',
+      pxlogicLogicMode: 0,
+    },
+    { stdin: { write() {}, on() {}, destroyed: false } },
+  );
+  const channelStates = enabled => Array.from({ length: 16 }, (_, index) => ({
+    channel: { type: 'Digital', index },
+    enabled,
+  }));
+  const apply = enabled => {
+    const written = [];
+    const restore = console.error;
+    console.error = message => written.push(String(message));
+    try {
+      controller.applySetting(0, {
+        type: 'Saleae::Graph::LogicDevice::EnableChannels',
+        channelStates: channelStates(enabled),
+      });
+    } finally {
+      console.error = restore;
+    }
+    lines.push(...written);
+  };
+
+  // Clear, All, and Clear again: toggling through the empty set repeatedly must stay
+  // survivable, since that is exactly what a user does with those two buttons.
+  assert.doesNotThrow(() => apply(false));
+  assert.doesNotThrow(() => apply(true));
+  assert.doesNotThrow(() => apply(false));
+
+  assert.equal(controller.getSessionSettings(0).enabledChannels.length, 0);
+  // The empty selection is still reported, so the panel can say why nothing can be
+  // captured rather than showing a stale plan.
+  const plans = lines
+    .filter(line => line.includes('"type":"capture-plan"'))
+    .map(line => JSON.parse(line.slice(line.indexOf('{'))));
+  const empty = plans.filter(plan => plan.enabledChannels.length === 0);
+  assert.equal(empty.length, 2);
+  for (const plan of empty) {
+    assert.equal(plan.supported, false);
+    assert.match(plan.reason, /未启用任何数字通道/);
+  }
+});
