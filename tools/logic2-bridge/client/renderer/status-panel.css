@@ -8,10 +8,31 @@
 
 * { box-sizing: border-box; }
 
+/* A flex column purely so the header can change ends. Block flow would stack the
+   children identically but gives nothing to reorder.
+
+   Nothing scrolls: the window is sized to the readout instead. A scrollbar inside a
+   340 px always-on-top monitor is noise, and the panel already has a way to get out
+   of the way, which is to collapse into its chip. */
+html, body { overflow: hidden; }
+
 body {
+  display: flex;
+  flex-direction: column;
   margin: 0;
   min-width: 300px;
   background: #f4f5f7;
+}
+
+/* Docked on the bottom edge, the panel mirrors itself. The header is the drag
+   handle and carries the collapse and hide controls, and a collapsed chip rests on
+   whichever edge the panel was docked against, so a header stranded at the top
+   would move the grab point the height of the whole readout on every collapse. The
+   separator has to change ends with it. */
+body.dock-bottom .panel-header {
+  order: 1;
+  border-top: 1px solid #151619;
+  border-bottom: 0;
 }
 
 button { font: inherit; cursor: pointer; letter-spacing: 0; }
@@ -33,22 +54,35 @@ button { font: inherit; cursor: pointer; letter-spacing: 0; }
 
 .live-state { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
 .live-state strong { flex: 0 0 auto; font-size: 13px; font-weight: 650; }
-.live-state #state-detail {
-  min-width: 0;
+
+/* Reserved for what the state label cannot express: an error code or a failure
+   message. The label already says connected or not, so restating that in small
+   print would spend a line of a 340 px panel on nothing. Long messages are
+   clamped rather than truncated to one line, with the full text on hover. */
+.live-problem {
+  display: -webkit-box;
+  margin: 4px 0 0;
   overflow: hidden;
-  color: #9aa0a8;
+  color: #f2b8ae;
   font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
+.live-problem[hidden] { display: none; }
+
 /* Device identity belongs next to the connection state, not in a section of its
-   own: together they answer "am I connected, and to what". */
+   own: together they answer "am I connected, and to what". The serial takes its
+   own line because 24 characters and a label cannot share a row with a model
+   name without one of them being cut short. */
 .live-device {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 1px;
   min-width: 0;
-  margin-top: 3px;
+  margin-top: 4px;
 }
 
 .live-device span {
@@ -60,8 +94,8 @@ button { font: inherit; cursor: pointer; letter-spacing: 0; }
   white-space: nowrap;
 }
 
-.live-device #device-label { flex: 0 1 auto; color: #c3c8cf; }
-.live-device #device-serial { flex: 1 1 auto; }
+.live-device #device-label { color: #c3c8cf; font-size: 11px; }
+.live-device #device-serial { font-variant-numeric: tabular-nums; }
 .live-device #device-serial[hidden] { display: none; }
 
 .panel-actions { display: flex; flex: 0 0 auto; gap: 6px; }

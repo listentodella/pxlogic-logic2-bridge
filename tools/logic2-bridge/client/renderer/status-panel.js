@@ -32,6 +32,8 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
     device: document.querySelector('#device-label'),
     serial: document.querySelector('#device-serial'),
     endpoint: document.querySelector('#endpoint'),
+    body: document.querySelector('main'),
+    footer: document.querySelector('footer'),
   };
   let hardware = null;
   let telemetry = null;
@@ -61,12 +63,23 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
     return hardware?.devices?.find(device => device.id === hardware.selectedDeviceId) || hardware?.devices?.[0];
   }
 
+  // The state label already reads 已连接 or 未连接, so this line only carries what
+  // the label cannot: an error code from the Bridge or a failed command. Calling
+  // it with nothing hides it rather than filling the row with a restatement.
+  function showProblem(text) {
+    const message = text ? String(text) : '';
+    elements.detail.textContent = message;
+    // Two lines are shown; hovering reveals the rest.
+    elements.detail.title = message;
+    elements.detail.hidden = !message;
+  }
+
   function renderState(state) {
     bridgeState = state;
     const phase = state?.phase || 'stopped';
     elements.dot.className = `state-dot ${phase}`;
     elements.state.textContent = state?.message || '待机';
-    elements.detail.textContent = state?.errorCode || (state?.actualPort ? 'Bridge 已连接到 Logic 2' : '等待 Logic 2 启动');
+    showProblem(state?.errorCode);
     elements.endpoint.textContent = state?.actualPort ? `WS ${state.actualPort}` : 'WebSocket --';
     elements.chipDot.className = `state-dot ${phase}`;
     renderChipLabel();
@@ -90,6 +103,32 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
     document.body.classList.toggle('collapsed', collapsed);
     elements.collapse.setAttribute('aria-expanded', String(!collapsed));
     renderChipLabel();
+    // Expanding reveals sections that were display:none and therefore unmeasurable.
+    if (!collapsed) fitToContent();
+  }
+
+  // Resting on the bottom edge puts the header there too, so the drag handle and
+  // the collapse control stay on the edge the panel is docked against. The Bridge
+  // decides this: it owns the work-area geometry and the snap tolerance.
+  function applyDock(bottom) {
+    document.body.classList.toggle('dock-bottom', Boolean(bottom));
+  }
+
+  // The window is sized to the readout rather than scrolled. Only the renderer can
+  // measure it: the height depends on how the text wrapped, and the first-run card
+  // and an error line each add a chunk. The three sections are measured directly
+  // instead of the document, whose height is capped by the window being corrected.
+  let fitPending = 0;
+  function fitToContent() {
+    if (collapsed) return;
+    cancelAnimationFrame(fitPending);
+    fitPending = requestAnimationFrame(() => {
+      const height = [elements.header, elements.body, elements.footer].reduce(
+        (total, node) => total + (node ? node.getBoundingClientRect().height : 0),
+        0,
+      );
+      if (height > 0) void invoke('status_panel_fit_height', { height: Math.ceil(height) }).catch(() => {});
+    });
   }
 
   async function setCollapsed(next) {
@@ -97,7 +136,7 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
     try {
       await invoke('status_panel_set_collapsed', { collapsed });
     } catch (error) {
-      elements.detail.textContent = String(error?.message || error);
+      showProblem(error?.message || error);
     }
   }
 
@@ -111,6 +150,29 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
   function bindDragHandle(handle, onClick) {
     let origin = null;
     let dragged = false;
+    let moving = false;
+    // One move request in flight at a time. The Bridge reads the live cursor on
+    // every step rather than trusting coordinates from here, so skipping a move
+    // costs nothing while queueing them would only add latency to the last one.
+    let pending = false;
+
+    function requestMove() {
+      if (pending) return;
+      pending = true;
+      void invoke('status_panel_move')
+        .catch(() => {})
+        .finally(() => {
+          pending = false;
+        });
+    }
+
+    function endMove() {
+      origin = null;
+      if (!moving) return;
+      moving = false;
+      void invoke('status_panel_end_move').catch(() => {});
+    }
+
     handle.addEventListener('mousedown', event => {
       if (event.button !== 0) return;
       // The chip is itself a button, so only nested controls block a drag.
@@ -120,18 +182,32 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
       dragged = false;
     });
     window.addEventListener('mousemove', event => {
+      if (moving) {
+        // Cocoa keeps delivering moves to the view that received the press even
+        // once the pointer leaves the window, but a release out there does not
+        // always come back as `mouseup`; a move without the button held is the
+        // one end-of-drag signal that always arrives.
+        if (event.buttons & 1) requestMove();
+        else endMove();
+        return;
+      }
       if (!origin) return;
       if (!(event.buttons & 1)) return;
       if (Math.abs(event.screenX - origin.x) < DRAG_THRESHOLD &&
           Math.abs(event.screenY - origin.y) < DRAG_THRESHOLD) return;
       origin = null;
       dragged = true;
-      // The window manager owns the pointer from here, so no mouseup arrives.
-      void invoke('status_panel_start_drag').catch(() => {});
+      moving = true;
+      // The Bridge moves the window itself instead of handing the gesture to
+      // macOS, which would arm the system's edge tiling and offer to zoom a
+      // 340 px monitor the moment it touches a screen edge.
+      void invoke('status_panel_begin_move').then(requestMove).catch(() => {
+        moving = false;
+      });
     });
-    window.addEventListener('mouseup', () => {
-      origin = null;
-    });
+    window.addEventListener('mouseup', endMove);
+    // A drag interrupted by losing the window has to release its anchor too.
+    window.addEventListener('blur', endMove);
     if (!onClick) return;
     handle.addEventListener('click', () => {
       if (dragged) {
@@ -150,7 +226,7 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
       if (disableAutoShow) await invoke('status_panel_set_auto_show', { enabled: false });
       await invoke('status_panel_intro_acknowledge');
     } catch (error) {
-      elements.detail.textContent = String(error?.message || error);
+      showProblem(error?.message || error);
     }
   }
 
@@ -208,6 +284,7 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
   bindDragHandle(elements.header, null);
   listen('bridge-state', event => renderState(event.payload));
   listen('capture-telemetry', event => renderTelemetry(event.payload));
+  listen('status-panel-dock', event => applyDock(event.payload?.bottom));
 
   invoke('client_initial_state').then(initial => {
     hardware = initial.hardware;
@@ -216,6 +293,21 @@ if (!tauri?.core?.invoke || !tauri?.event?.listen) {
     renderState(initial.bridgeState);
     renderTelemetry(initial.captureTelemetry);
   }).catch(error => {
-    elements.detail.textContent = String(error?.message || error);
+    showProblem(error?.message || error);
   });
+  // The change event only fires on a change, so a panel reloaded long after its
+  // last move has to ask which way round it belongs.
+  invoke('status_panel_dock_edge').then(applyDock).catch(() => {});
+
+  // Anything that changes the height goes through a layout: the error line
+  // appearing, the first-run card being dismissed, a value wrapping onto a second
+  // line after the user narrows the panel. Observing the sections catches all of
+  // them without every render site having to remember to ask.
+  if (window.ResizeObserver) {
+    const observer = new ResizeObserver(() => fitToContent());
+    for (const section of [elements.header, elements.body, elements.footer]) {
+      if (section) observer.observe(section);
+    }
+  }
+  fitToContent();
 }

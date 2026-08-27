@@ -268,10 +268,30 @@ test('the status panel draws its own chrome and packs the readout tightly', () =
   // The header carries the live state and the device identity together, because
   // "am I connected" and "to what" are one question. A separate title line and a
   // separate device section were pure chrome.
-  assert.match(html, /<div class="live-state">[\s\S]*?id="state-dot"[\s\S]*?id="state-label"[\s\S]*?id="state-detail"/);
+  assert.match(html, /<div class="live-state">[\s\S]*?id="state-dot"[\s\S]*?id="state-label"[\s\S]*?<\/div>/);
   assert.match(html, /<div class="live-device">[\s\S]*?id="device-label"[\s\S]*?id="device-serial"/);
   assert.ok(!html.includes('class="eyebrow"'), 'the panel must not spend a line on branding');
   assert.ok(!/<h1>/.test(html), 'a static title is not worth a line in a 340 px panel');
+
+  // The state label already reads 已连接 or 未连接, so nothing else shares its row.
+  // The line below it exists only for what the label cannot say -- an error code
+  // or a failed command -- and starts hidden instead of restating the label.
+  const liveState = html.match(/<div class="live-state">[\s\S]*?<\/div>/)[0];
+  assert.ok(
+    !liveState.includes('state-detail'),
+    'the state row must not carry small print alongside the label',
+  );
+  assert.match(html, /<p id="state-detail" class="live-problem" hidden><\/p>/);
+  assert.ok(
+    !html.includes('Bridge 已连接到 Logic 2'),
+    'the state label already reports whether the Bridge reached Logic 2',
+  );
+  assert.match(script, /function showProblem\(/);
+  assert.match(script, /elements\.detail\.hidden = !message;/);
+
+  // A 24-character serial cannot share a row with a model name without one of
+  // them being cut short, so the identity lines stack.
+  assert.match(css, /\.live-device \{[\s\S]*?flex-direction: column;/);
 
   // The data link is two tight lines in one card rather than a section of its own.
   assert.match(html, /<section class="quality-row">/);
@@ -284,25 +304,112 @@ test('the status panel draws its own chrome and packs the readout tightly', () =
   assert.match(script, /const DRAG_THRESHOLD = 6;/);
   assert.match(script, /if \(!\(event\.buttons & 1\)\) return;/);
   assert.match(script, /if \(control && control !== handle\) return;/);
-  assert.match(script, /invoke\('status_panel_start_drag'\)/);
+  assert.match(script, /invoke\('status_panel_begin_move'\)/);
+  assert.match(script, /invoke\('status_panel_move'\)/);
+  assert.match(script, /invoke\('status_panel_end_move'\)/);
   // Both shapes must be movable: with no titlebar the header is the drag handle.
   assert.match(script, /bindDragHandle\(elements\.chip, \(\) => void setCollapsed\(false\)\)/);
   assert.match(script, /bindDragHandle\(elements\.header, null\)/);
   assert.match(script, /invoke\('status_panel_set_collapsed', \{ collapsed \}\)/);
   assert.match(script, /applyCollapsed\(initial\.settings\?\.statusPanel\?\.collapsed\)/);
 
-  assert.match(backend, /fn status_panel_start_drag\(app: AppHandle\)/);
+  assert.match(backend, /fn status_panel_begin_move\(app: AppHandle\)/);
+  // Handing the gesture to the window manager is what arms macOS edge tiling, so
+  // the panel is moved from the cursor's own displacement instead and held on the
+  // work area for the whole drag.
+  assert.ok(
+    !/\.start_dragging\(\)/.test(backend),
+    'a native window drag lets macOS offer to tile the panel at a screen edge',
+  );
+  assert.match(backend, /fn confine_dragged_panel\(/);
+  assert.match(backend, /let \(x, y\) = confine_dragged_panel\(moved, cursor, &panel_work_areas\(&window\)\);/);
+  assert.match(backend, /x: anchor\.window_x \+ \(cursor\.x - anchor\.cursor_x\)\.round\(\) as i32,/);
+
+  // Docked on the bottom edge the panel mirrors itself, so the drag handle and the
+  // collapse control stay on the edge a collapsing chip will rest on. The Bridge
+  // owns the decision because it owns the work-area geometry and the tolerance.
+  assert.match(css, /body \{[\s\S]*?display: flex;[\s\S]*?flex-direction: column;/);
+  assert.match(css, /body\.dock-bottom \.panel-header \{[\s\S]*?order: 1;/);
+  assert.match(css, /body\.dock-bottom \.panel-header \{[\s\S]*?border-top: 1px solid #151619;/);
+  assert.match(script, /listen\('status-panel-dock', event => applyDock\(event\.payload\?\.bottom\)\)/);
+  assert.match(script, /classList\.toggle\('dock-bottom', Boolean\(bottom\)\)/);
+  // A reload can land long after the last move, and the change event will not fire.
+  assert.match(script, /invoke\('status_panel_dock_edge'\)\.then\(applyDock\)/);
+  assert.match(backend, /fn panel_docked_at_bottom\(/);
+  assert.match(backend, /STATUS_PANEL_SNAP_THRESHOLD\)\n\}/);
+  // Every path that can change the panel's geometry has to resolve the layout.
+  const dockSyncs = backend.match(/sync_status_panel_dock\(/g) || [];
+  assert.ok(
+    dockSyncs.length >= 5,
+    `the dock state must be resolved after a resize, a drag, a settle and both reveals, saw ${dockSyncs.length} call sites`,
+  );
+
+  // Nothing scrolls. The readout is short and collapses into a chip when it is in
+  // the way, so the window follows the content instead of offering a scrollbar. No
+  // constant can predict the height: the first-run card and an error line each add a
+  // chunk, so the renderer measures and the Bridge applies.
+  assert.match(css, /html, body \{ overflow: hidden; \}/);
+  assert.match(script, /invoke\('status_panel_fit_height', \{ height: Math\.ceil\(height\) \}\)/);
+  assert.match(script, /new ResizeObserver\(\(\) => fitToContent\(\)\)/);
+  assert.match(backend, /fn status_panel_fit_height\(app: AppHandle, height: f64\)/);
+  // Locking the height is what makes a scrollbar impossible rather than merely
+  // hidden, and the lock has to be released before a 44 px chip can fit.
+  assert.match(backend, /set_max_size\(Some\(tauri::LogicalSize::new\(\n\s*STATUS_PANEL_MAX_WIDTH,/);
+  assert.match(backend, /set_max_size\(None::<tauri::LogicalSize<f64>>\)/);
+  // Without a tolerance the physical/logical rounding bounces against the observer.
+  assert.match(backend, /if \(physical - rect\.height\)\.abs\(\) <= 1 \{/);
+
+  // Expanding must not be visible as two steps. Each window mutation posted on its
+  // own can be committed as its own frame, so the panel gets drawn at the new size in
+  // the old place first; they go in one main-thread turn instead.
+  assert.match(backend, /fn apply_panel_frame\(/);
+  assert.match(backend, /run_on_main_thread\(apply\)\.is_ok\(\)/);
+  assert.ok(
+    !/\n    let _ = window\.set_size\(tauri::LogicalSize::new\(width, height\)\);/.test(backend),
+    'shape changes must go through apply_panel_frame rather than resizing directly',
+  );
+  // The orientation is decided from where the chip will expand to, not from the chip:
+  // a chip just clear of the bottom edge expands flush against it, and settling that
+  // afterwards makes the header visibly jump across the panel.
+  assert.match(backend, /fn project_expanded_panel\(/);
+  assert.match(backend, /fn publish_dock_for_panel\(/);
+  assert.match(
+    backend,
+    /publish_dock_for_panel\(app, scale, target, &work_areas\);\n\s*let floor =/,
+  );
+  // Opening at the height the content measured last time removes the second resize.
+  assert.match(backend, /expanded_panel_height\s*\n?\s*\.store\(target\.round\(\) as u32/);
   // Cocoa anchors a resize at the bottom-left, so the shape change has to put the
-  // origin back or the chip slides away from where the panel was.
-  assert.match(backend, /let anchor = window\.outer_position\(\)\.ok\(\);/);
-  assert.match(backend, /if let Some\(anchor\) = anchor \{\n\s*let _ = window\.set_position\(anchor\);/);
+  // origin back or the chip slides away from where the panel was. The chip can be
+  // parked anywhere, including hard against an edge, so the new shape is then
+  // placed rather than merely restored: growing in place would push the readout
+  // off the display, and the snap and clamp rules both let that through.
+  assert.match(backend, /let Some\(anchor\) = panel_rect\(window\) else \{/);
+  assert.match(backend, /fn place_resized_panel\(/);
+  assert.match(backend, /fn anchored_axis\(/);
+  assert.match(
+    backend,
+    /let \(x, y\) = place_resized_panel\(anchor, resized, &work_areas\);/,
+  );
+  // The size has to come from the request, not from a read-back that can still
+  // report the shape being left behind.
+  assert.match(backend, /width: \(width \* scale\)\.round\(\) as i32,/);
+  assert.match(backend, /height: \(height \* scale\)\.round\(\) as i32,/);
+  assert.match(backend, /let _ = window\.set_position\(tauri::PhysicalPosition::new\(x, y\)\);/);
   // Toggling decorations is gone: the window never has them.
   assert.ok(
     !backend.includes('set_decorations'),
     'the panel window is undecorated in both shapes',
   );
-  // Changing shape can detach an edge-snapped panel, so re-settle afterwards.
-  assert.match(backend, /settle_status_panel\(&app, &window\);/);
+  // A settle pass reads the size back, so it cannot run inline with the resize.
+  // The debounced one behind the move event still snaps and persists the result.
+  assert.ok(
+    !/apply_status_panel_collapsed\(&app, &window, collapsed\);\n\s*\/\/[\s\S]{0,200}?settle_status_panel\(&app, &window\);/.test(
+      backend,
+    ),
+    'placing the new shape must not be followed by a settle on a stale size',
+  );
+  assert.match(backend, /schedule_status_panel_settle\(&status\);/);
 });
 
 test('the native host is signed so copies of it survive macOS gatekeeping', () => {

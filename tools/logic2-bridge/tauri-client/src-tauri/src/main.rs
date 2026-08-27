@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
         Mutex,
     },
     thread,
@@ -572,6 +572,37 @@ struct AppState {
     /// Logical width of the expanded panel, remembered across a collapse so the
     /// chosen width survives the round trip. 0 means never measured.
     expanded_panel_width: AtomicU32,
+    /// Logical height the renderer last measured for the readout. Restoring it on
+    /// expand is what keeps the panel from resizing again the instant it opens.
+    /// 0 means never measured.
+    expanded_panel_height: AtomicU32,
+    /// Set while the user is dragging the status panel. `None` means no drag is in
+    /// progress and stray move requests are ignored.
+    panel_drag: Mutex<Option<PanelDragAnchor>>,
+    /// Which edge the panel is resting on, so the layout is only re-flipped when it
+    /// actually changes: 0 unknown, 1 anywhere else, 2 the bottom of the display.
+    panel_dock: AtomicU8,
+}
+
+/// Tells the panel which way round to lay itself out.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusPanelDock {
+    bottom: bool,
+}
+
+/// Where a panel drag started, in physical desktop pixels.
+///
+/// The panel is moved by the cursor's own displacement from this point rather
+/// than by coordinates handed over from the renderer: the Bridge reads the live
+/// cursor on every step, so a coalesced, dropped or out-of-order move event
+/// cannot accumulate drift.
+#[derive(Clone, Copy, Debug)]
+struct PanelDragAnchor {
+    window_x: i32,
+    window_y: i32,
+    cursor_x: f64,
+    cursor_y: f64,
 }
 
 impl Default for AppState {
@@ -587,6 +618,9 @@ impl Default for AppState {
             quitting: AtomicBool::new(false),
             panel_move_generation: AtomicU64::new(0),
             expanded_panel_width: AtomicU32::new(0),
+            expanded_panel_height: AtomicU32::new(0),
+            panel_drag: Mutex::new(None),
+            panel_dock: AtomicU8::new(0),
         }
     }
 }
@@ -2701,8 +2735,15 @@ const STATUS_PANEL_MIN_WIDTH: f64 = 300.0;
 const STATUS_PANEL_COLLAPSED_WIDTH: f64 = 168.0;
 const STATUS_PANEL_COLLAPSED_HEIGHT: f64 = 44.0;
 const STATUS_PANEL_EXPANDED_WIDTH: f64 = 340.0;
-const STATUS_PANEL_EXPANDED_HEIGHT: f64 = 340.0;
+/// Only the height the panel opens at before the renderer has measured itself.
+/// `status_panel_fit_height` replaces it with the real content height as soon as the
+/// readout has laid out, so this just needs to be close enough that the first frame
+/// does not visibly jump.
+const STATUS_PANEL_EXPANDED_HEIGHT: f64 = 358.0;
 const STATUS_PANEL_EXPANDED_MIN_HEIGHT: f64 = 260.0;
+/// Wide enough to never constrain the user, but finite: locking the panel's height
+/// to its content needs a maximum size, and that call takes both axes.
+const STATUS_PANEL_MAX_WIDTH: f64 = 4096.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PanelRect {
@@ -2857,50 +2898,107 @@ fn restore_status_panel_position(window: &tauri::WebviewWindow, saved: Option<Pa
 /// The window carries no native decorations in either shape: a titlebar would
 /// duplicate the panel's own collapse and hide controls, and on a 44 px chip it
 /// would dwarf the chip entirely. Only the inner size changes here.
+/// The expanded shape to restore: the width the user last chose and the height the
+/// renderer last measured for its content. The constants are only reached before the
+/// panel has been expanded once, and restoring the measured height is what stops the
+/// panel resizing a second time the instant it opens.
+fn expanded_panel_size(app: &AppHandle) -> (f64, f64) {
+    let state = app.state::<AppState>();
+    let width = match state.expanded_panel_width.load(Ordering::Acquire) {
+        0 => STATUS_PANEL_EXPANDED_WIDTH,
+        remembered => f64::from(remembered).max(STATUS_PANEL_MIN_WIDTH),
+    };
+    let height = match state.expanded_panel_height.load(Ordering::Acquire) {
+        0 => STATUS_PANEL_EXPANDED_HEIGHT,
+        remembered => f64::from(remembered).max(STATUS_PANEL_COLLAPSED_HEIGHT),
+    };
+    (width, height)
+}
+
+/// Applies a shape change as a single main-thread turn.
+///
+/// Each window mutation posted on its own can be committed as its own frame, and the
+/// panel is then visibly drawn at the new size in the old place before it jumps.
+/// Batching them lets AppKit coalesce the whole change into one visible update.
+///
+/// The height lock is released first because it is set to whatever the content
+/// measured last time, and it would otherwise refuse both a 44 px chip and any new
+/// content height outright.
+fn apply_panel_frame(
+    window: &tauri::WebviewWindow,
+    min_size: tauri::LogicalSize<f64>,
+    size: tauri::LogicalSize<f64>,
+    position: tauri::PhysicalPosition<i32>,
+) {
+    let target = window.clone();
+    let apply = move || {
+        let _ = target.set_max_size(None::<tauri::LogicalSize<f64>>);
+        let _ = target.set_min_size(Some(min_size));
+        let _ = target.set_size(size);
+        let _ = target.set_position(position);
+    };
+    if window.app_handle().run_on_main_thread(apply).is_ok() {
+        return;
+    }
+    let _ = window.set_max_size(None::<tauri::LogicalSize<f64>>);
+    let _ = window.set_min_size(Some(min_size));
+    let _ = window.set_size(size);
+    let _ = window.set_position(position);
+}
+
 fn apply_status_panel_collapsed(app: &AppHandle, window: &tauri::WebviewWindow, collapsed: bool) {
     let scale = window.scale_factor().unwrap_or(1.0);
-    let state = app.state::<AppState>();
-    // Cocoa anchors a resize at the bottom-left, so shrinking the panel would
-    // otherwise slide its visible top edge down the screen and leave the user
-    // hunting for the chip. Restoring the pre-resize origin keeps the corner the
-    // user actually looks at fixed.
-    let anchor = window.outer_position().ok();
-    if !collapsed {
-        // Restore the width the user had before collapsing rather than snapping
-        // back to the default every time.
-        let remembered = state.expanded_panel_width.load(Ordering::Acquire);
-        let width = if remembered > 0 {
-            f64::from(remembered).max(STATUS_PANEL_MIN_WIDTH)
-        } else {
-            STATUS_PANEL_EXPANDED_WIDTH
-        };
-        let _ = window.set_size(tauri::LogicalSize::new(width, STATUS_PANEL_EXPANDED_HEIGHT));
-        let _ = window.set_min_size(Some(tauri::LogicalSize::new(
-            STATUS_PANEL_MIN_WIDTH,
-            STATUS_PANEL_EXPANDED_MIN_HEIGHT,
-        )));
-    } else {
+    // Cocoa anchors a resize at the bottom-left, so resizing on its own slides the
+    // panel's visible top edge down the screen and leaves the user hunting for the
+    // chip. The pre-resize rectangle is captured here and the panel is re-placed
+    // against it once the new shape is known.
+    let Some(anchor) = panel_rect(window) else {
+        return;
+    };
+    let work_areas = panel_work_areas(window);
+    let (width, height) = if collapsed {
         if let Ok(size) = window.inner_size() {
             let logical = (f64::from(size.width) / scale).round();
             if logical >= STATUS_PANEL_MIN_WIDTH {
-                state
+                app.state::<AppState>()
                     .expanded_panel_width
                     .store(logical as u32, Ordering::Release);
             }
         }
-        // The floor has to drop before the window can shrink past it.
-        let _ = window.set_min_size(Some(tauri::LogicalSize::new(
-            STATUS_PANEL_COLLAPSED_WIDTH,
-            STATUS_PANEL_COLLAPSED_HEIGHT,
-        )));
-        let _ = window.set_size(tauri::LogicalSize::new(
-            STATUS_PANEL_COLLAPSED_WIDTH,
-            STATUS_PANEL_COLLAPSED_HEIGHT,
-        ));
-    }
-    if let Some(anchor) = anchor {
-        let _ = window.set_position(anchor);
-    }
+        (STATUS_PANEL_COLLAPSED_WIDTH, STATUS_PANEL_COLLAPSED_HEIGHT)
+    } else {
+        expanded_panel_size(app)
+    };
+    // The new size comes from what is about to be requested instead of being read
+    // back: the change is posted to the main thread and has not necessarily landed,
+    // and a stale read would place the panel using the shape it is leaving. The
+    // window is undecorated, so a logical inner size scales straight to a physical
+    // outer one.
+    let resized = PanelRect {
+        width: (width * scale).round() as i32,
+        height: (height * scale).round() as i32,
+        ..anchor
+    };
+    let (x, y) = place_resized_panel(anchor, resized, &work_areas);
+    let target = PanelRect { x, y, ..resized };
+    // Orientation before geometry. The renderer has to know which end the header
+    // belongs on before the panel is painted at full size, or it paints one frame
+    // the wrong way round and the header visibly jumps across the panel.
+    publish_dock_for_panel(app, scale, target, &work_areas);
+    let floor = if collapsed {
+        tauri::LogicalSize::new(STATUS_PANEL_COLLAPSED_WIDTH, STATUS_PANEL_COLLAPSED_HEIGHT)
+    } else {
+        tauri::LogicalSize::new(
+            STATUS_PANEL_MIN_WIDTH,
+            STATUS_PANEL_EXPANDED_MIN_HEIGHT.min(height),
+        )
+    };
+    apply_panel_frame(
+        window,
+        floor,
+        tauri::LogicalSize::new(width, height),
+        tauri::PhysicalPosition::new(x, y),
+    );
 }
 
 fn snap_axis(start: i32, length: i32, area_start: i32, area_length: i32, threshold: i32) -> i32 {
@@ -2956,6 +3054,206 @@ fn work_area_under_panel(panel: PanelRect, work_areas: &[PanelRect]) -> Option<P
     best.map(|(_, area)| area)
 }
 
+/// Where one edge of the panel lands when the panel changes shape.
+///
+/// A panel resting against a work-area edge has to keep resting against it: an
+/// expand has to grow inwards and the matching collapse has to shrink back
+/// outwards, or every toggle walks the panel further from the edge it was parked
+/// against.
+///
+/// The closing clamp is what keeps an expanded panel readable. The chip can be
+/// dropped anywhere, so it is routinely parked at an edge, and growing it there
+/// pushes the readout past the display by the difference between the two shapes.
+/// Nothing else recovers that: `snap_axis` ignores an overshoot far larger than
+/// its threshold, and `clamp_panel_position` settles for
+/// `STATUS_PANEL_MIN_VISIBLE`, which is the right answer for a remembered
+/// position and the wrong one for a panel the user just asked to read.
+fn anchored_axis(
+    start: i32,
+    old_length: i32,
+    new_length: i32,
+    area_start: i32,
+    area_length: i32,
+    threshold: i32,
+) -> i32 {
+    let area_end = area_start + area_length;
+    let holds_start = (start - area_start).abs() <= threshold;
+    let holds_end = (start + old_length - area_end).abs() <= threshold;
+    // A panel spanning the whole axis sits at both edges at once; holding the
+    // start is then the only choice that does not make it jump.
+    let candidate = if holds_end && !holds_start {
+        area_end - new_length
+    } else {
+        start
+    };
+    clamp_axis(candidate, new_length, area_start, area_length)
+}
+
+/// Places a panel that just changed shape. `anchor` is the rectangle it occupied
+/// beforehand and `resized` carries the new size at the old origin.
+///
+/// The display is chosen from where the panel already was rather than from the
+/// grown rectangle, so expanding beside a second monitor cannot hop onto it just
+/// because the larger shape happens to overlap it more.
+fn place_resized_panel(
+    anchor: PanelRect,
+    resized: PanelRect,
+    work_areas: &[PanelRect],
+) -> (i32, i32) {
+    let Some(area) =
+        work_area_under_panel(anchor, work_areas).or_else(|| work_areas.first().copied())
+    else {
+        return (resized.x, resized.y);
+    };
+    (
+        anchored_axis(
+            anchor.x,
+            anchor.width,
+            resized.width,
+            area.x,
+            area.width,
+            STATUS_PANEL_SNAP_THRESHOLD,
+        ),
+        anchored_axis(
+            anchor.y,
+            anchor.height,
+            resized.height,
+            area.y,
+            area.height,
+            STATUS_PANEL_SNAP_THRESHOLD,
+        ),
+    )
+}
+
+/// Keeps a panel that is being dragged wholly on one display.
+///
+/// The display is chosen by the cursor rather than by the panel, so the panel can
+/// still be dragged onto a second monitor: it follows the pointer across the seam
+/// instead of sticking against the edge of the display it started on. A cursor
+/// that is outside every work area -- in the menu bar, say -- falls back to the
+/// display showing most of the panel.
+///
+/// Clamping is the point of the function. The reason to drag an always-on-top
+/// readout into a corner is to keep reading it, so the window manager's usual
+/// freedom to push most of it off the screen is not worth having here.
+fn confine_dragged_panel(
+    panel: PanelRect,
+    cursor: (i32, i32),
+    work_areas: &[PanelRect],
+) -> (i32, i32) {
+    let holds_cursor = |area: &&PanelRect| {
+        (area.x..area.right()).contains(&cursor.0) && (area.y..area.bottom()).contains(&cursor.1)
+    };
+    let Some(area) = work_areas
+        .iter()
+        .find(holds_cursor)
+        .copied()
+        .or_else(|| work_area_under_panel(panel, work_areas))
+        .or_else(|| work_areas.first().copied())
+    else {
+        return (panel.x, panel.y);
+    };
+    (
+        clamp_axis(panel.x, panel.width, area.x, area.width),
+        clamp_axis(panel.y, panel.height, area.y, area.height),
+    )
+}
+
+/// Whether the panel is resting on the bottom edge of its display.
+///
+/// Shares `STATUS_PANEL_SNAP_THRESHOLD` with the snap and the resize anchor so all
+/// three agree: a panel close enough to the bottom to be snapped there is also
+/// close enough to hold a collapsing chip there, and to mirror its own layout.
+/// Continuous confinement during a drag pins a docked panel at exactly zero
+/// distance, so the tolerance mostly acts as stickiness once docked rather than as
+/// a band to hover in.
+fn panel_docked_at_bottom(panel: PanelRect, work_areas: &[PanelRect]) -> bool {
+    work_area_under_panel(panel, work_areas)
+        .or_else(|| work_areas.first().copied())
+        .is_some_and(|area| (panel.bottom() - area.bottom()).abs() <= STATUS_PANEL_SNAP_THRESHOLD)
+}
+
+/// Where a collapsed chip will land once it is expanded, computed through the same
+/// placement the expand itself uses so the two cannot disagree.
+fn project_expanded_panel(
+    chip: PanelRect,
+    expanded: (i32, i32),
+    work_areas: &[PanelRect],
+) -> PanelRect {
+    let resized = PanelRect {
+        width: expanded.0,
+        height: expanded.1,
+        ..chip
+    };
+    let (x, y) = place_resized_panel(chip, resized, work_areas);
+    PanelRect { x, y, ..resized }
+}
+
+/// Where the panel will sit once expanded, given the rectangle it occupies now.
+///
+/// A collapsed chip is projected forward. The orientation only shows in the expanded
+/// layout, and judging it by the chip gets it wrong exactly where it matters: a chip
+/// resting 36 px above the bottom edge is not docked, but expanding it is clamped
+/// flush to that edge, so the panel would open with its header at the wrong end and
+/// reflow after it had already been painted. That reads as the header jumping across
+/// the panel.
+fn projected_expanded_panel(
+    app: &AppHandle,
+    scale: f64,
+    panel: PanelRect,
+    work_areas: &[PanelRect],
+) -> PanelRect {
+    // Already showing the readout, so its own rectangle decides the layout.
+    if f64::from(panel.height) / scale > STATUS_PANEL_COLLAPSED_HEIGHT + 1.0 {
+        return panel;
+    }
+    let (width, height) = expanded_panel_size(app);
+    let expanded = (
+        (width * scale).round() as i32,
+        (height * scale).round() as i32,
+    );
+    project_expanded_panel(panel, expanded, work_areas)
+}
+
+/// Tells the panel to mirror itself when it comes to rest on the bottom edge, and
+/// only when that changes.
+///
+/// The header is the drag handle and carries the collapse and hide controls, and a
+/// collapsed chip rests on the same edge the panel was docked against. Leaving the
+/// header at the top of a bottom-docked panel would move the grab point the height
+/// of the whole readout every time the shape changed.
+///
+/// Takes the rectangle rather than reading the window: geometry changes are posted to
+/// the main thread and a read-back can still report the shape being left behind.
+fn publish_dock_for_panel(app: &AppHandle, scale: f64, panel: PanelRect, work_areas: &[PanelRect]) {
+    let bottom = panel_docked_at_bottom(
+        projected_expanded_panel(app, scale, panel, work_areas),
+        work_areas,
+    );
+    let encoded = if bottom { 2 } else { 1 };
+    if app
+        .state::<AppState>()
+        .panel_dock
+        .swap(encoded, Ordering::AcqRel)
+        == encoded
+    {
+        return;
+    }
+    let _ = app.emit_to("status", "status-panel-dock", StatusPanelDock { bottom });
+}
+
+fn sync_status_panel_dock(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let Some(rect) = panel_rect(window) else {
+        return;
+    };
+    publish_dock_for_panel(
+        app,
+        window.scale_factor().unwrap_or(1.0),
+        rect,
+        &panel_work_areas(window),
+    );
+}
+
 fn persist_status_panel_position(app: &AppHandle, position: PanelPosition) {
     let mut settings = load_settings(app);
     if settings.status_panel.position == Some(position) {
@@ -2981,6 +3279,9 @@ fn settle_status_panel(app: &AppHandle, window: &tauri::WebviewWindow) {
         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
     }
     persist_status_panel_position(app, PanelPosition { x, y });
+    // A snap can be what finally brings the panel onto the edge, so the layout is
+    // resolved after the position, not before it.
+    sync_status_panel_dock(app, window);
 }
 
 /// `Moved` fires continuously while the user drags. Persisting on every event
@@ -3025,6 +3326,7 @@ fn show_status_panel(app: &AppHandle) {
         let panel = load_settings(app).status_panel;
         apply_status_panel_collapsed(app, &window, panel.collapsed);
         restore_status_panel_position(&window, panel.position);
+        sync_status_panel_dock(app, &window);
         let _ = window.show();
         let _ = window.set_always_on_top(true);
     }
@@ -3038,6 +3340,7 @@ fn show_status_panel_without_activating(app: &AppHandle) {
         let panel = load_settings(app).status_panel;
         apply_status_panel_collapsed(app, &window, panel.collapsed);
         restore_status_panel_position(&window, panel.position);
+        sync_status_panel_dock(app, &window);
         let _ = window.show();
         let _ = window.set_always_on_top(true);
     }
@@ -3089,9 +3392,9 @@ fn status_panel_set_collapsed(app: AppHandle, collapsed: bool) -> Result<(), Str
         return Err("状态面板窗口不可用".to_string());
     };
     apply_status_panel_collapsed(&app, &window, collapsed);
-    // Changing shape can leave a right- or bottom-snapped panel detached from the
-    // edge it was resting against, so re-settle instead of leaving a gap.
-    settle_status_panel(&app, &window);
+    // No settle pass here: `apply_status_panel_collapsed` already places the new
+    // shape from the size it requested, whereas a settle would read the size back
+    // and can still see the shape being left behind.
     let mut settings = load_settings(&app);
     if settings.status_panel.collapsed != collapsed {
         settings.status_panel.collapsed = collapsed;
@@ -3100,17 +3403,168 @@ fn status_panel_set_collapsed(app: AppHandle, collapsed: bool) -> Result<(), Str
     Ok(())
 }
 
-/// Hands an in-progress pointer drag to the window manager. The collapsed chip
-/// is one big click target, so it cannot also be a static drag region: the
-/// renderer only calls this once the pointer has actually moved.
+/// The collapsed chip is one big click target, so it cannot also be a static drag
+/// region: the renderer only calls this once the pointer has actually moved.
+///
+/// Starts a panel drag that the Bridge carries out itself.
+///
+/// `start_dragging()` hands the gesture to the window manager. On macOS that is
+/// what arms the system's edge tiling: dragging the panel against a screen edge
+/// offers to zoom or tile it, which is meaningless for a 340 px always-on-top
+/// readout and discards the position the user was aiming for. Driving the move
+/// from here avoids that entirely, and is also the only way to hold the panel
+/// fully on the work area while it is moving.
 #[tauri::command]
-fn status_panel_start_drag(app: AppHandle) -> Result<(), String> {
+fn status_panel_begin_move(app: AppHandle) -> Result<(), String> {
     let Some(window) = app.get_webview_window("status") else {
         return Err("状态面板窗口不可用".to_string());
     };
-    window
-        .start_dragging()
-        .map_err(|error| format!("无法拖动状态面板: {error}"))
+    let position = window
+        .outer_position()
+        .map_err(|error| format!("无法读取状态面板位置: {error}"))?;
+    let cursor = app
+        .cursor_position()
+        .map_err(|error| format!("无法读取光标位置: {error}"))?;
+    if let Ok(mut drag) = app.state::<AppState>().panel_drag.lock() {
+        *drag = Some(PanelDragAnchor {
+            window_x: position.x,
+            window_y: position.y,
+            cursor_x: cursor.x,
+            cursor_y: cursor.y,
+        });
+    }
+    Ok(())
+}
+
+/// Moves the panel to wherever the cursor has travelled since the drag began.
+/// Called once per pointer move; a move that arrives with no drag in progress is
+/// ignored rather than treated as an error, because the release and the last move
+/// can cross paths.
+#[tauri::command]
+fn status_panel_move(app: AppHandle) {
+    let Some(window) = app.get_webview_window("status") else {
+        return;
+    };
+    let Some(anchor) = app
+        .state::<AppState>()
+        .panel_drag
+        .lock()
+        .ok()
+        .and_then(|drag| *drag)
+    else {
+        return;
+    };
+    let (Ok(cursor), Some(rect)) = (app.cursor_position(), panel_rect(&window)) else {
+        return;
+    };
+    let moved = PanelRect {
+        x: anchor.window_x + (cursor.x - anchor.cursor_x).round() as i32,
+        y: anchor.window_y + (cursor.y - anchor.cursor_y).round() as i32,
+        ..rect
+    };
+    let cursor = (cursor.x.round() as i32, cursor.y.round() as i32);
+    let (x, y) = confine_dragged_panel(moved, cursor, &panel_work_areas(&window));
+    if (x, y) != (rect.x, rect.y) {
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    sync_status_panel_dock(&app, &window);
+}
+
+#[tauri::command]
+fn status_panel_end_move(app: AppHandle) {
+    if let Ok(mut drag) = app.state::<AppState>().panel_drag.lock() {
+        *drag = None;
+    }
+}
+
+/// Read once as the panel loads. The change event covers everything afterwards,
+/// but a reload can happen long after the last move, and the panel must not come
+/// back the wrong way round.
+#[tauri::command]
+fn status_panel_dock_edge(app: AppHandle) -> bool {
+    let Some(window) = app.get_webview_window("status") else {
+        return false;
+    };
+    let Some(rect) = panel_rect(&window) else {
+        return false;
+    };
+    panel_docked_at_bottom(rect, &panel_work_areas(&window))
+}
+
+/// Sizes the expanded panel to the height the renderer measured for its content.
+///
+/// The readout is short and can be collapsed into its chip when it is in the way, so
+/// scrolling it is never the right answer; the window follows the content instead.
+/// Only the renderer can supply the number, because it depends on how the text
+/// wrapped: the first-run card and an error line each add a chunk that no constant
+/// can anticipate.
+///
+/// The height is then locked, which is what makes a scrollbar structurally
+/// impossible rather than merely hidden. Width stays free so long values can be
+/// given more room.
+#[tauri::command]
+fn status_panel_fit_height(app: AppHandle, height: f64) {
+    let Some(window) = app.get_webview_window("status") else {
+        return;
+    };
+    if !height.is_finite() || height <= 0.0 {
+        return;
+    }
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let Some(rect) = panel_rect(&window) else {
+        return;
+    };
+    // A chip is 44 px of fixed chrome; fitting it to a readout it is not showing
+    // would blow it back up to full size.
+    if f64::from(rect.height) / scale <= STATUS_PANEL_COLLAPSED_HEIGHT + 1.0 {
+        return;
+    }
+    let work_areas = panel_work_areas(&window);
+    // Never taller than the display: an always-on-top panel covering the screen is a
+    // worse outcome than one whose content is clipped.
+    let ceiling = work_area_under_panel(rect, &work_areas)
+        .or_else(|| work_areas.first().copied())
+        .map_or(STATUS_PANEL_EXPANDED_HEIGHT, |area| {
+            f64::from(area.height) / scale
+        })
+        .max(STATUS_PANEL_EXPANDED_MIN_HEIGHT);
+    let target = height.clamp(STATUS_PANEL_EXPANDED_MIN_HEIGHT.min(ceiling), ceiling);
+    let physical = (target * scale).round() as i32;
+    // Remembered even when the size already matches, so the next expand opens at the
+    // measured height instead of the constant and needs no second resize.
+    app.state::<AppState>()
+        .expanded_panel_height
+        .store(target.round() as u32, Ordering::Release);
+    // Rounding between logical and physical pixels can leave a pixel of
+    // disagreement, which would otherwise bounce between here and the renderer's
+    // resize observer forever.
+    if (physical - rect.height).abs() <= 1 {
+        return;
+    }
+    let width = f64::from(rect.width) / scale;
+    // Growing a panel docked on the bottom edge has to grow it upwards, exactly as
+    // expanding from a chip there does.
+    let resized = PanelRect {
+        height: physical,
+        ..rect
+    };
+    let (x, y) = place_resized_panel(rect, resized, &work_areas);
+    publish_dock_for_panel(&app, scale, PanelRect { x, y, ..resized }, &work_areas);
+    apply_panel_frame(
+        &window,
+        tauri::LogicalSize::new(STATUS_PANEL_MIN_WIDTH, target),
+        tauri::LogicalSize::new(width, target),
+        tauri::PhysicalPosition::new(x, y),
+    );
+    // The lock is what makes a scrollbar impossible rather than merely hidden, and it
+    // has to land after the resize that `apply_panel_frame` clears it for.
+    let locked = window.clone();
+    let _ = window.app_handle().run_on_main_thread(move || {
+        let _ = locked.set_max_size(Some(tauri::LogicalSize::new(
+            STATUS_PANEL_MAX_WIDTH,
+            target,
+        )));
+    });
 }
 
 #[tauri::command]
@@ -4036,7 +4490,11 @@ fn main() {
             status_panel_hide,
             status_panel_toggle,
             status_panel_set_collapsed,
-            status_panel_start_drag,
+            status_panel_begin_move,
+            status_panel_move,
+            status_panel_end_move,
+            status_panel_dock_edge,
+            status_panel_fit_height,
             status_panel_intro_acknowledge,
             status_panel_set_auto_show,
             onboarding_complete,
@@ -4367,6 +4825,263 @@ mod tests {
         // Off every display, so there is nothing to snap to.
         let panel = status_panel_rect(-5000, 400);
         assert_eq!(work_area_under_panel(panel, &areas), None);
+    }
+
+    const COLLAPSED_CHIP: (i32, i32) = (168, 44);
+    const EXPANDED_PANEL: (i32, i32) = (340, 340);
+
+    fn resize(at: (i32, i32), from: (i32, i32), to: (i32, i32)) -> (PanelRect, PanelRect) {
+        (
+            PanelRect {
+                x: at.0,
+                y: at.1,
+                width: from.0,
+                height: from.1,
+            },
+            PanelRect {
+                x: at.0,
+                y: at.1,
+                width: to.0,
+                height: to.1,
+            },
+        )
+    }
+
+    fn expand(at: (i32, i32), areas: &[PanelRect]) -> (i32, i32) {
+        let (anchor, resized) = resize(at, COLLAPSED_CHIP, EXPANDED_PANEL);
+        place_resized_panel(anchor, resized, areas)
+    }
+
+    #[test]
+    fn expanding_a_chip_parked_at_an_edge_grows_inwards() {
+        let areas = [PRIMARY_WORK_AREA];
+
+        // Flush against the right edge: the readout has to grow leftwards.
+        assert_eq!(expand((1752, 400), &areas), (1580, 400));
+        // Flush against the bottom edge: upwards.
+        assert_eq!(expand((400, 1036), &areas), (400, 740));
+        // A corner does both at once.
+        assert_eq!(expand((1752, 1036), &areas), (1580, 740));
+        // The top-left corner has room in both directions, so nothing moves.
+        assert_eq!(expand((0, 25), &areas), (0, 25));
+    }
+
+    #[test]
+    fn expanding_near_an_edge_pulls_the_whole_readout_back_on_screen() {
+        let areas = [PRIMARY_WORK_AREA];
+
+        // The chip sits well clear of the snap threshold, so it is not treated as
+        // parked, but expanding in place would still hang 120 px off the display.
+        assert_eq!(expand((1700, 400), &areas), (1580, 400));
+        assert_eq!(expand((400, 900), &areas), (400, 740));
+
+        // One pixel of overflow is still overflow.
+        assert_eq!(expand((1581, 400), &areas), (1580, 400));
+    }
+
+    #[test]
+    fn expanding_leaves_a_panel_with_room_exactly_where_it_was() {
+        let areas = [PRIMARY_WORK_AREA];
+        assert_eq!(expand((700, 400), &areas), (700, 400));
+        assert_eq!(expand((1580, 740), &areas), (1580, 740));
+    }
+
+    #[test]
+    fn collapsing_from_an_edge_keeps_the_chip_against_that_edge() {
+        let areas = [PRIMARY_WORK_AREA];
+        let collapse = |at| {
+            let (anchor, resized) = resize(at, EXPANDED_PANEL, COLLAPSED_CHIP);
+            place_resized_panel(anchor, resized, &areas)
+        };
+
+        // Expanding from the right edge and collapsing again has to return the chip
+        // to the same corner, or every toggle walks it further inwards.
+        assert_eq!(collapse((1580, 400)), (1752, 400));
+        assert_eq!(collapse((400, 740)), (400, 1036));
+        assert_eq!(collapse((1580, 740)), (1752, 1036));
+
+        // Away from any edge the origin is what stays put.
+        assert_eq!(collapse((700, 400)), (700, 400));
+    }
+
+    #[test]
+    fn expanding_beside_another_display_stays_on_the_one_the_chip_is_on() {
+        let secondary = PanelRect {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let areas = [PRIMARY_WORK_AREA, secondary];
+
+        // The chip is flush against the primary's right edge. The expanded shape
+        // overlaps the secondary display more than the primary, so choosing the
+        // display from the grown rectangle would throw the panel onto the wrong
+        // monitor; it is chosen from where the chip actually sits.
+        assert_eq!(expand((1752, 400), &areas), (1580, 400));
+
+        // A chip genuinely on the secondary display expands there.
+        assert_eq!(expand((3672, 400), &areas), (3500, 400));
+    }
+
+    #[test]
+    fn a_panel_too_large_for_its_display_starts_at_the_corner() {
+        let cramped = PanelRect {
+            x: 0,
+            y: 25,
+            width: 320,
+            height: 200,
+        };
+        // Neither axis can fit, so the panel starts at the corner and the user
+        // resizes or moves it from there.
+        assert_eq!(expand((100, 100), &[cramped]), (0, 25));
+    }
+
+    #[test]
+    fn a_resize_with_no_display_to_measure_against_stays_put() {
+        let (anchor, resized) = resize((700, 400), COLLAPSED_CHIP, EXPANDED_PANEL);
+        assert_eq!(place_resized_panel(anchor, resized, &[]), (700, 400));
+    }
+
+    fn drag(to: (i32, i32), cursor: (i32, i32), areas: &[PanelRect]) -> (i32, i32) {
+        let panel = PanelRect {
+            x: to.0,
+            y: to.1,
+            width: EXPANDED_PANEL.0,
+            height: EXPANDED_PANEL.1,
+        };
+        confine_dragged_panel(panel, cursor, areas)
+    }
+
+    #[test]
+    fn dragging_the_panel_at_an_edge_stops_it_going_off_screen() {
+        let areas = [PRIMARY_WORK_AREA];
+
+        // Pushed past each edge in turn, the panel comes to rest against it with
+        // the whole readout still on screen.
+        assert_eq!(drag((1700, 400), (1800, 500), &areas), (1580, 400));
+        assert_eq!(drag((-50, 400), (100, 500), &areas), (0, 400));
+        assert_eq!(drag((400, 900), (500, 1000), &areas), (400, 740));
+
+        // The macOS menu bar is outside the work area, so a cursor up there
+        // matches no display and the panel falls back to the one it overlaps.
+        assert_eq!(drag((400, -30), (500, 10), &areas), (400, 25));
+
+        // With room to spare the panel goes exactly where it was dragged.
+        assert_eq!(drag((700, 400), (800, 500), &areas), (700, 400));
+    }
+
+    #[test]
+    fn dragging_across_a_seam_follows_the_cursor_onto_the_other_display() {
+        let secondary = PanelRect {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let areas = [PRIMARY_WORK_AREA, secondary];
+
+        // Still on the primary: confined to it, so the panel cannot spill over the
+        // seam and be cut in half.
+        assert_eq!(drag((1850, 400), (1900, 450), &areas), (1580, 400));
+
+        // The cursor crosses the seam, so the panel follows it onto the secondary
+        // display rather than sticking to the primary's edge.
+        assert_eq!(drag((1850, 400), (1960, 450), &areas), (1920, 400));
+    }
+
+    #[test]
+    fn dragging_with_no_display_to_measure_against_stays_put() {
+        assert_eq!(drag((700, 400), (800, 500), &[]), (700, 400));
+    }
+
+    #[test]
+    fn the_panel_reports_resting_on_the_bottom_edge() {
+        let areas = [PRIMARY_WORK_AREA];
+        let at = |y| {
+            panel_docked_at_bottom(
+                PanelRect {
+                    x: 700,
+                    y,
+                    width: EXPANDED_PANEL.0,
+                    height: EXPANDED_PANEL.1,
+                },
+                &areas,
+            )
+        };
+
+        // Flush against the bottom, which is where confinement leaves a panel that
+        // was dragged there.
+        assert!(at(740));
+        // Within the shared snap tolerance on either side of flush.
+        assert!(at(724));
+        assert!(at(756));
+        // One pixel beyond it is not docked.
+        assert!(!at(723));
+        // Nowhere near, and hard against the top.
+        assert!(!at(400));
+        assert!(!at(25));
+    }
+
+    #[test]
+    fn a_collapsed_chip_on_the_bottom_edge_is_docked_too() {
+        let areas = [PRIMARY_WORK_AREA];
+        let chip = |y| {
+            panel_docked_at_bottom(
+                PanelRect {
+                    x: 700,
+                    y,
+                    width: COLLAPSED_CHIP.0,
+                    height: COLLAPSED_CHIP.1,
+                },
+                &areas,
+            )
+        };
+
+        // Expanding a chip parked on the bottom edge keeps the panel on that edge,
+        // so both shapes have to agree about being docked or the layout would flip
+        // back and forth as the panel is collapsed and expanded.
+        assert!(chip(1036));
+        assert!(!chip(400));
+    }
+
+    #[test]
+    fn orientation_follows_where_the_chip_will_expand_to() {
+        let areas = [PRIMARY_WORK_AREA];
+        let project = |y| {
+            project_expanded_panel(
+                PanelRect {
+                    x: 700,
+                    y,
+                    width: COLLAPSED_CHIP.0,
+                    height: COLLAPSED_CHIP.1,
+                },
+                EXPANDED_PANEL,
+                &areas,
+            )
+        };
+
+        // A chip resting 36 px clear of the bottom edge is not itself docked, but
+        // expanding it is clamped flush to that edge. Judging the orientation by the
+        // chip would open the panel with its header at the top and then move it,
+        // which is seen as the header jumping across the panel after it is drawn.
+        let chip_at_1000 = PanelRect {
+            x: 700,
+            y: 1000,
+            width: COLLAPSED_CHIP.0,
+            height: COLLAPSED_CHIP.1,
+        };
+        assert!(!panel_docked_at_bottom(chip_at_1000, &areas));
+        assert_eq!(project(1000).y, 740);
+        assert!(panel_docked_at_bottom(project(1000), &areas));
+
+        // Flush already: the projection lands on the same place rather than moving.
+        assert_eq!(project(1036).y, 740);
+        assert!(panel_docked_at_bottom(project(1036), &areas));
+
+        // Well clear of the edge, the projection stays put and reports no dock.
+        assert_eq!(project(400).y, 400);
+        assert!(!panel_docked_at_bottom(project(400), &areas));
     }
 
     #[test]
