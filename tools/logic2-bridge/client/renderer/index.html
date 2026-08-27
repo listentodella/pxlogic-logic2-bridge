@@ -270,6 +270,27 @@
       </div>
     </dialog>
 
+    <dialog id="logic-running-confirmation" class="warning-dialog">
+      <h2>需要先关闭正在运行的 Logic 2</h2>
+      <p id="logic-running-message"></p>
+      <p class="dialog-note">
+        运行中的 Logic 2 无法挂接到新的 Bridge 会话。它重连后不会在新的 GraphServer 里重建设备状态，
+        窗口看起来正常但点击采集不会有任何反应，因此必须关闭后重新打开。
+      </p>
+      <p class="firmware-warning">
+        该窗口里<strong>未保存的采集数据将会丢失</strong>。如果有需要保留的测试数据，请先取消，
+        在 Logic 2 里保存后再回来启动。
+      </p>
+      <label class="confirmation-check" for="logic-running-checkbox">
+        <input id="logic-running-checkbox" type="checkbox">
+        <span>我已保存需要保留的采集数据，可以关闭这些窗口</span>
+      </label>
+      <div class="dialog-actions">
+        <button id="cancel-logic-running-button" class="secondary-button" type="button">取消</button>
+        <button id="confirm-logic-running-button" class="primary-button" type="button" disabled>关闭并启动</button>
+      </div>
+    </dialog>
+
     <dialog id="onboarding-wizard" class="wizard-dialog">
       <p class="wizard-progress">第 <strong id="wizard-step-index">1</strong> / 4 步</p>
 

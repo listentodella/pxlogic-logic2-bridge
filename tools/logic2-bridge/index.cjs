@@ -496,6 +496,92 @@ function nativeHookArguments(runtime) {
   ];
 }
 
+function signNativeHost(executable) {
+  if (process.platform !== 'darwin') return;
+  // clang emits a "linker-signed" ad-hoc signature, which stops validating once
+  // the binary is copied by a process carrying provenance. macOS then kills the
+  // copy with SIGKILL (Code Signature Invalid) before it prints a line.
+  // Re-signing yields a genuine ad-hoc signature that survives copying.
+  const signed = spawnSync(
+    'codesign',
+    ['--force', '--sign', '-', executable],
+    { cwd: bridgeRoot, encoding: 'utf8' },
+  );
+  if (signed.status !== 0) {
+    throw new Error(`Failed to sign native host:\n${signed.stderr || signed.stdout}`);
+  }
+}
+
+function compileNativeHost(source, executable) {
+  console.log('[logic2-bridge] compiling version-locked native GraphServer host');
+  const compiler = process.platform === 'darwin' ? 'xcrun' : 'cc';
+  const compilerArgs = process.platform === 'darwin' ? ['clang'] : [];
+  compilerArgs.push('-std=c11', '-O2', '-Wall', '-Wextra', source, '-o', executable);
+  if (process.platform === 'linux') compilerArgs.push('-ldl', '-pthread');
+  const result = spawnSync(compiler, compilerArgs, { cwd: bridgeRoot, encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(`Failed to compile native host:\n${result.stderr || result.stdout}`);
+  }
+  signNativeHost(executable);
+}
+
+/*
+ * Proves the host can be executed at all.
+ *
+ * macOS refuses to load a binary whose code signature it has rejected and kills
+ * the process with SIGKILL before a single line reaches stdout. The Bridge would
+ * otherwise only learn about it fifteen seconds later, as "Native GraphServer
+ * exited before ready (SIGKILL)", with nothing pointing at the cause.
+ */
+function nativeHostLaunchFailure(executable) {
+  const probe = spawnSync(executable, [], { encoding: 'utf8' });
+  if (probe.error) return probe.error.message;
+  if (probe.signal) return `killed by ${probe.signal} on launch`;
+  if (!`${probe.stdout || ''}${probe.stderr || ''}`.startsWith('Usage:')) {
+    return 'did not report its usage contract';
+  }
+  return null;
+}
+
+function bridgeStateRoot() {
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'PXLogic', 'logic2-bridge');
+  }
+  if (process.platform === 'win32') {
+    return path.join(process.env.LOCALAPPDATA || os.homedir(), 'PXLogic', 'logic2-bridge');
+  }
+  return path.join(
+    process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'),
+    'pxlogic',
+    'logic2-bridge',
+  );
+}
+
+/*
+ * Rebuilds the host at a path macOS has no verdict against.
+ *
+ * A rejected code signature is cached against the inode, so overwriting the file
+ * keeps the rejection - which is what Tauri's resource staging does every build.
+ * The C source is not part of the payload, so recompiling is not an option
+ * either. Copying to a fresh file gives a fresh inode, and doing it outside the
+ * installation keeps a signed application bundle untouched.
+ */
+function repairNativeHost(executable) {
+  const scratchRoot = path.join(bridgeStateRoot(), 'native');
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  const repaired = path.join(scratchRoot, path.basename(executable));
+  // The scratch copy can carry a verdict of its own from an earlier attempt, so
+  // it has to be unlinked rather than overwritten.
+  fs.rmSync(repaired, { force: true });
+  fs.copyFileSync(executable, repaired);
+  if (process.platform !== 'win32') fs.chmodSync(repaired, 0o755);
+  if (process.platform === 'darwin') {
+    spawnSync('xattr', ['-c', repaired], { encoding: 'utf8' });
+    signNativeHost(repaired);
+  }
+  return repaired;
+}
+
 function ensureNativeHost() {
   const supportedNativeHost =
     (process.platform === 'darwin' && process.arch === 'arm64') ||
@@ -524,41 +610,157 @@ function ensureNativeHost() {
     if (!sourceExists) {
       throw new Error(`Prebuilt native GraphServer host was not found: ${executable}`);
     }
-    console.log('[logic2-bridge] compiling version-locked native GraphServer host');
-    const compiler = process.platform === 'darwin' ? 'xcrun' : 'cc';
-    const compilerArgs = process.platform === 'darwin'
-      ? ['clang']
-      : [];
-    compilerArgs.push('-std=c11', '-O2', '-Wall', '-Wextra', source, '-o', executable);
-    if (process.platform === 'linux') compilerArgs.push('-ldl', '-pthread');
-    const result = spawnSync(
-      compiler,
-      compilerArgs,
-      { cwd: bridgeRoot, encoding: 'utf8' },
+    compileNativeHost(source, executable);
+  }
+
+  const failure = nativeHostLaunchFailure(executable);
+  if (!failure) return executable;
+
+  console.log(`[logic2-bridge] native GraphServer host ${failure}; repairing it`);
+  const repaired = repairNativeHost(executable);
+  const repairedFailure = nativeHostLaunchFailure(repaired);
+  if (!repairedFailure) {
+    console.log(`[logic2-bridge] using repaired GraphServer host: ${repaired}`);
+    return repaired;
+  }
+  // Recompiling is only possible where the C source ships, which the payload does
+  // not include; treat it as a last resort rather than the primary recovery.
+  if (sourceExists) {
+    fs.rmSync(executable, { force: true });
+    compileNativeHost(source, executable);
+    const rebuiltFailure = nativeHostLaunchFailure(executable);
+    if (!rebuiltFailure) return executable;
+    throw new Error(
+      `Native GraphServer host still cannot be executed after a rebuild ` +
+      `(${rebuiltFailure}): ${executable}`,
     );
-    if (result.status !== 0) {
-      throw new Error(`Failed to compile native host:\n${result.stderr || result.stdout}`);
-    }
-    if (process.platform === 'darwin') {
-      // clang emits a "linker-signed" ad-hoc signature, which stops validating
-      // once the binary is copied by a process carrying provenance. macOS then
-      // kills the copy with SIGKILL (Code Signature Invalid) before it prints a
-      // line. Re-signing yields a genuine ad-hoc signature that survives copying.
-      // Only the binary this call just produced is touched, so a signed
-      // application bundle is never modified.
-      const signed = spawnSync(
-        'codesign',
-        ['--force', '--sign', '-', executable],
-        { cwd: bridgeRoot, encoding: 'utf8' },
-      );
-      if (signed.status !== 0) {
-        throw new Error(
-          `Failed to sign native host:\n${signed.stderr || signed.stdout}`,
-        );
+  }
+  throw new Error(
+    `Native GraphServer host cannot be executed (${failure}) and the repaired ` +
+    `copy failed too (${repairedFailure}): ${executable}`,
+  );
+}
+
+/*
+ * Kills native hosts left behind by earlier sessions.
+ *
+ * The host is a grandchild of the launcher. When the Bridge process is killed
+ * outright its shutdown path never runs, and the host is reparented to init
+ * where it keeps its backend port and its injected hooks alive indefinitely.
+ * Only processes that have actually lost their parent are considered, so a
+ * concurrent Bridge session is never disturbed.
+ */
+function reapOrphanedNativeHosts(executables) {
+  if (process.platform === 'win32') return;
+  const targets = new Set(Array.isArray(executables) ? executables : [executables]);
+  const listed = spawnSync('ps', ['-axo', 'pid=,ppid=,comm='], { encoding: 'utf8' });
+  if (listed.status !== 0 || !listed.stdout) return;
+  const self = process.pid;
+  for (const line of listed.stdout.split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!match) continue;
+    const [, rawPid, rawParent, command] = match;
+    const pid = Number(rawPid);
+    if (!targets.has(command) || pid === self) continue;
+    if (Number(rawParent) !== 1) continue;
+    try {
+      process.kill(pid, 'SIGKILL');
+      console.log(`[logic2-bridge] reaped orphaned GraphServer host pid ${pid}`);
+    } catch (error) {
+      if (error.code !== 'ESRCH') {
+        console.error(`[logic2-bridge] could not reap GraphServer host pid ${pid}: ${error.message}`);
       }
     }
   }
-  return executable;
+}
+
+/*
+ * Finds Logic windows already running from the configured installation.
+ *
+ * A running window cannot be handed to a new Bridge session. Logic's graph client
+ * does reconnect to the address it was given - it retries that address forever -
+ * but on reconnect it only re-sends the calibration storage root. It never
+ * recreates its session, re-acquires the device, or re-applies channels and
+ * sample rate, so a fresh GraphServer is left with no device and capture silently
+ * does nothing. Replacing the window is therefore the only reliable option.
+ * `graphPort` is kept so the user can be told which windows the Bridge started.
+ */
+/*
+ * Kills Bridge sessions abandoned by an earlier launcher run.
+ *
+ * A session owns the graph proxy port and the native host. When its launcher is
+ * replaced or killed the session is reparented to init and keeps that port, so a
+ * new session cannot bind the address the surviving Logic window is retrying, and
+ * two live sessions would leave that window talking to whichever one answered
+ * first. SIGKILL rather than SIGTERM is deliberate: the polite path takes the
+ * Logic window down with it, and that window is exactly what the new session
+ * wants to adopt.
+ */
+async function reapOrphanedBridgeSessions(logicExecutable, entryScript) {
+  if (process.platform === 'win32') return;
+  const listed = spawnSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' });
+  if (listed.status !== 0 || !listed.stdout) return;
+  const script = path.basename(entryScript);
+  const reaped = [];
+  for (const line of listed.stdout.split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!match) continue;
+    const [, rawPid, rawParent, command] = match;
+    const pid = Number(rawPid);
+    if (pid === process.pid || Number(rawParent) !== 1) continue;
+    if (!command.startsWith(logicExecutable)) continue;
+    const first = command.slice(logicExecutable.length).trim().split(/\s+/)[0] || '';
+    if (path.basename(first) !== script) continue;
+    try {
+      process.kill(pid, 'SIGKILL');
+      reaped.push(pid);
+      console.log(`[logic2-bridge] reaped abandoned Bridge session pid ${pid}`);
+    } catch (error) {
+      if (error.code !== 'ESRCH') {
+        console.error(`[logic2-bridge] could not reap Bridge session pid ${pid}: ${error.message}`);
+      }
+    }
+  }
+  if (!reaped.length) return;
+  // The proxy binds later, but only once the old owner has actually released the
+  // address, so wait for the process to disappear rather than racing it.
+  const alive = pid => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (!reaped.some(alive)) return;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
+function findRunningLogicInstances(executable) {
+  if (process.platform === 'win32') return [];
+  const listed = spawnSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf8' });
+  if (listed.status !== 0 || !listed.stdout) return [];
+  const instances = [];
+  for (const line of listed.stdout.split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(.*)$/);
+    if (!match) continue;
+    const [, rawPid, command] = match;
+    const pid = Number(rawPid);
+    if (pid === process.pid || !command.startsWith(executable)) continue;
+    const args = command.slice(executable.length).trim();
+    // The Bridge runs through this very binary in Node mode with its entry
+    // script as the first argument, so every Bridge process - including this
+    // one - matches the executable prefix without being a Logic window.
+    if (/^\S*\.cjs(\s|$)/.test(args)) continue;
+    // Chromium spawns its renderer, GPU and utility children from the same
+    // binary; only the browser process owns the graph connection.
+    if (/(^|\s)--type=/.test(args)) continue;
+    const port = args.match(/--graphPort[= ](\d+)/);
+    instances.push({ pid, graphPort: port ? Number(port[1]) : null });
+  }
+  return instances;
 }
 
 function findAvailableTcpPort() {
@@ -675,16 +877,36 @@ async function main() {
     return;
   }
 
+  // A session abandoned by an earlier launcher still owns its proxy port and its
+  // native host. Clearing it first frees the address and stops two live sessions
+  // from splitting one Logic window between them.
+  await reapOrphanedBridgeSessions(runtime.executable, process.argv[1] || 'index.cjs');
+
+  // Resolve a running Logic before touching the hardware: it has to be replaced,
+  // and there is no point preparing the FPGA for a start that cannot proceed.
+  const running = findRunningLogicInstances(runtime.executable);
+  if (running.length) {
+    const described = running
+      .map(instance => (instance.graphPort ? `${instance.pid}（Bridge 启动）` : `${instance.pid}`))
+      .join('、');
+    console.error(bridgeEventLine({
+      type: 'logic-already-running',
+      code: 'LOGIC_ALREADY_RUNNING',
+      pids: running.map(instance => instance.pid),
+    }));
+    throw new Error(
+      `Logic 2 已在运行（pid ${described}）。运行中的窗口无法挂接到新的 Bridge 会话：` +
+      'Logic 重连后不会在新的 GraphServer 里重建设备状态，采集会静默失效。' +
+      '请先保存并关闭该窗口，再启动 Bridge。',
+    );
+  }
+
   // PXView prepares the FPGA when a device is opened, not on every capture.
   // Keep the prepared state in the hardware for this Bridge process and make
   // every later Start/Stop operation capture-only.
   await preparePxlogicDevice(options);
 
-  const stateRoot = process.platform === 'darwin'
-    ? path.join(os.homedir(), 'Library', 'Application Support', 'PXLogic', 'logic2-bridge')
-    : process.platform === 'win32'
-      ? path.join(process.env.LOCALAPPDATA || os.homedir(), 'PXLogic', 'logic2-bridge')
-      : path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'), 'pxlogic', 'logic2-bridge');
+  const stateRoot = bridgeStateRoot();
   const calibrationRoot = path.join(stateRoot, 'mso-calibration');
   const logPath = path.join(stateRoot, 'graphio.log');
   fs.mkdirSync(calibrationRoot, { recursive: true });
@@ -704,6 +926,12 @@ async function main() {
   // intentionally append-only across Bridge runs, so historical assertions
   // must never be replayed as a current failure.
   graphLogMonitor.poll();
+  // Hosts from either location can be left behind, so both are considered.
+  reapOrphanedNativeHosts([
+    nativeHost,
+    path.join(bridgeStateRoot(), 'native', path.basename(nativeHost)),
+    path.join(bridgeRoot, 'build', path.basename(nativeHost)),
+  ]);
   const host = spawn(nativeHost, [
     runtime.sharedLibrary,
     runtime.pythonHome,
@@ -809,6 +1037,17 @@ async function main() {
       await Promise.race([
         waitForExit(host),
         new Promise(resolve => setTimeout(resolve, 3000)),
+      ]);
+    }
+    // The host holds hooks patched into Logic's GraphServer and does not always
+    // unwind them in time. Leaving it behind after a polite request orphans it
+    // onto init, where it keeps its port for the rest of the login session.
+    if (host.exitCode === null) {
+      console.error('[logic2-bridge] GraphServer host ignored SIGTERM; forcing it down');
+      host.kill('SIGKILL');
+      await Promise.race([
+        waitForExit(host),
+        new Promise(resolve => setTimeout(resolve, 2000)),
       ]);
     }
     graphLogMonitor.poll();

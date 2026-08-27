@@ -334,6 +334,124 @@ test('the native host is signed so copies of it survive macOS gatekeeping', () =
   assert.match(prepare, /the code signature is most likely invalid/);
 });
 
+test('a running Logic window blocks the start instead of being reattached', () => {
+  const bridgeRoot = path.resolve(__dirname, '..');
+  const index = fs.readFileSync(path.join(bridgeRoot, 'index.cjs'), 'utf8');
+  const proxy = fs.readFileSync(path.join(bridgeRoot, 'lib/websocket-proxy.cjs'), 'utf8');
+
+  // Logic reconnects to the address it was given but only re-sends the
+  // calibration storage root; it never recreates its session, re-acquires the
+  // device, or re-applies channels and sample rate. A reattached window therefore
+  // looks connected while capture silently does nothing, so every running window
+  // has to be replaced rather than reused.
+  assert.match(index, /function findRunningLogicInstances\(executable\)/);
+  assert.match(index, /if \(running\.length\) \{/);
+  assert.match(index, /LOGIC_ALREADY_RUNNING/);
+  assert.match(index, /采集会静默失效/);
+  // The Bridge runs through the same Logic binary in Node mode and Chromium
+  // spawns helpers from it, so neither may be mistaken for a window.
+  assert.match(index, /if \(pid === process\.pid \|\| !command\.startsWith\(executable\)\) continue;/);
+  assert.match(index, /if \(\/\^\\S\*\\\.cjs\(\\s\|\$\)\/\.test\(args\)\) continue;/);
+  assert.match(index, /--type=/);
+
+  // Reattachment machinery must be gone, not merely unused.
+  for (const orphan of ['adopted', 'waitForExternalExit', 'requireExactPort']) {
+    assert.ok(!index.includes(orphan), `index.cjs still references ${orphan}`);
+  }
+  assert.ok(!proxy.includes('requireExactPort'), 'the proxy still takes requireExactPort');
+  // Falling back to an automatic port is correct again now that no window is
+  // waiting on a fixed one.
+  assert.match(proxy, /if \(error\.code === 'EADDRINUSE' && requestedPort !== 0 && !retriedWithAutomaticPort\)/);
+});
+
+test('the launcher confirms before closing a running Logic window', () => {
+  const rendererRoot = path.resolve(__dirname, '../client/renderer');
+  const html = fs.readFileSync(path.join(rendererRoot, 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(rendererRoot, 'app.js'), 'utf8');
+  const backend = fs.readFileSync(
+    path.resolve(__dirname, '../tauri-client/src-tauri/src/main.rs'),
+    'utf8',
+  );
+
+  assert.match(html, /id="logic-running-confirmation"/);
+  assert.match(html, /id="logic-running-checkbox"/);
+  assert.match(html, /id="confirm-logic-running-button"[^>]*disabled/);
+  // Closing someone else's application can lose unsaved captures, so the risk has
+  // to be stated and the checkbox has to gate the button.
+  assert.match(html, /未保存的采集数据[\s\S]{0,40}将会丢失/);
+  assert.match(html, /我已保存需要保留的采集数据/);
+  assert.match(html, /点击采集不会有任何反应/);
+  assert.match(app, /if \(!elements\.logicRunningCheckbox\.checked\) return;/);
+  assert.match(app, /elements\.confirmLogicRunningButton\.disabled = !elements\.logicRunningCheckbox\.checked/);
+  // Escape closes a <dialog> natively and must count as declining.
+  assert.match(app, /const onClose = \(\) => settle\(false\);/);
+  // The check runs before start, and a decline aborts it.
+  assert.match(app, /if \(!await resolveRunningLogic\(\)\) return;/);
+  // Every running window is offered for closing; none can be reattached.
+  assert.match(app, /const blocking = instances \|\| \[\];/);
+
+  assert.match(backend, /fn running_logic_instances\(executable: &Path\)/);
+  assert.match(backend, /fn logic_running_instances\(app: AppHandle\)/);
+  assert.match(backend, /async fn logic_close_instances\(app: AppHandle, pids: Vec<u32>\)/);
+  // A stale pid list from the renderer must not become a kill of anything else.
+  assert.match(backend, /let known: HashSet<u32> = running_logic_instances/);
+  assert.match(backend, /\.filter\(\|pid\| known\.contains\(pid\)\)/);
+  // Polite first, forcible only after waiting.
+  assert.match(backend, /terminate_single_process\(\*pid, false\)\?;/);
+  assert.match(backend, /terminate_single_process\(\*pid, true\)/);
+});
+
+test('the native host recovers from a signature macOS has already rejected', () => {
+  const bridgeRoot = path.resolve(__dirname, '..');
+  const index = fs.readFileSync(path.join(bridgeRoot, 'index.cjs'), 'utf8');
+
+  // macOS caches a rejected signature against the inode, so rewriting the file in
+  // place keeps the rejection - which is exactly what Tauri's resource staging
+  // does. The C source is not part of the payload, so recompiling is unavailable
+  // and recovery has to work from the binary alone: a copy at a fresh path gets a
+  // fresh inode, and putting it outside the installation leaves a signed
+  // application bundle untouched.
+  assert.match(index, /function nativeHostLaunchFailure\(executable\)/);
+  assert.match(index, /if \(probe\.signal\) return `killed by \$\{probe\.signal\} on launch`;/);
+  assert.match(index, /function repairNativeHost\(executable\)/);
+  assert.match(index, /const scratchRoot = path\.join\(bridgeStateRoot\(\), 'native'\);/);
+  assert.match(index, /fs\.rmSync\(repaired, \{ force: true \}\);/);
+  assert.match(index, /return repaired;/);
+  assert.match(index, /the repaired \` \+\n\s*\`copy failed too/);
+  // Recompiling stays available where the source does ship, but only as a fallback.
+  assert.match(index, /if \(sourceExists\) \{/);
+
+  // The host outlives a killed launcher unless it is forced down, and an orphan
+  // keeps its port and its injected hooks for the rest of the login session. Both
+  // the installed path and the repaired copy can be left behind.
+  assert.match(index, /function reapOrphanedNativeHosts\(executables\)/);
+  assert.match(index, /if \(Number\(rawParent\) !== 1\) continue;/);
+  assert.match(index, /reapOrphanedNativeHosts\(\[/);
+  assert.match(index, /host\.kill\('SIGKILL'\)/);
+});
+
+test('an abandoned Bridge session is cleared before a new one starts', () => {
+  const bridgeRoot = path.resolve(__dirname, '..');
+  const index = fs.readFileSync(path.join(bridgeRoot, 'index.cjs'), 'utf8');
+
+  // A session whose launcher is gone keeps its proxy port and its native host.
+  // Leaving it would let two live sessions split one Logic window between them,
+  // which looks like "connected but capture does nothing".
+  assert.match(index, /async function reapOrphanedBridgeSessions\(logicExecutable, entryScript\)/);
+  assert.match(index, /if \(pid === process\.pid \|\| Number\(rawParent\) !== 1\) continue;/);
+  assert.match(index, /if \(path\.basename\(first\) !== script\) continue;/);
+  // SIGTERM would run its shutdown path and close the Logic window mid-check;
+  // closing it is the launcher's decision, taken with the user's confirmation.
+  assert.match(index, /process\.kill\(pid, 'SIGKILL'\)/);
+  // Binding races the old owner unless the wait is explicit.
+  assert.match(index, /if \(!reaped\.some\(alive\)\) return;/);
+  // Must run before the Logic scan so the scan sees the settled process list.
+  const reapAt = index.indexOf('await reapOrphanedBridgeSessions(');
+  const scanAt = index.indexOf('const running = findRunningLogicInstances(');
+  assert.ok(reapAt > 0 && scanAt > reapAt, 'sessions are reaped before Logic is scanned');
+
+});
+
 test('every selectable firmware image is shipped and matches the manifest', () => {
   const firmwareRoot = path.resolve(__dirname, '../../../resources/firmware');
   const manifest = JSON.parse(fs.readFileSync(path.join(firmwareRoot, 'releases.json'), 'utf8'));

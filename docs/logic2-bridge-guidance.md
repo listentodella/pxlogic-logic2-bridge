@@ -137,3 +137,46 @@ enumerates the settings entry points and fails when a new one appears.
 
 Adding another backend-owned field means adding it to
 `merge_backend_owned_settings`.
+
+## Restarting the Bridge while Logic is running
+
+A running Logic window cannot be handed to a new Bridge session. Logic's graph
+client does reconnect — it retries the address baked into its renderer URL once a
+second, forever — but on reconnect it only re-sends the calibration storage root.
+It never recreates its session, re-acquires the device, or re-applies channels and
+sample rate, so a fresh GraphServer is left with no device at all. The window looks
+connected while capture silently does nothing.
+
+That was measured, not assumed. A normal start drives the GraphServer through
+`Creating session`, `acquire request`, `enable channels`, `set digital voltage
+threshold` and `set sample rate`; a reattached session logs only `Physical device
+scanning disabled by client` and `Configured MSO DC calibration storage root`. The
+Bridge's own capture controller is equally blind, because it learns channels and
+sample rate solely by observing those requests, and then refuses the capture with
+`StartCapture has no enabled digital channels`.
+
+So the launcher replaces rather than reattaches:
+
+- Any running Logic window blocks the start. `index.cjs` refuses before touching
+  the hardware, so no FPGA preparation is wasted on a start that cannot proceed.
+- The launcher offers to close the windows first. Closing someone's window can
+  lose an unsaved capture, so the dialog says so plainly and the checkbox asks the
+  user to confirm they have saved what they need.
+- `logic_close_instances` re-scans before signalling, so a stale pid list from the
+  renderer cannot be turned into a kill of an unrelated process. SIGTERM first,
+  SIGKILL only after waiting.
+
+Three related leaks are fixed alongside it:
+
+- **Abandoned Bridge sessions.** The session is a child of the launcher; when the
+  launcher is killed the session is reparented to init and keeps its proxy port
+  and native host. Two live sessions would split one Logic window between them,
+  which is the other way "connected but capture does nothing" happens. Orphans are
+  SIGKILLed before a new session starts.
+- **Orphaned native hosts.** The host is forced down with SIGKILL if it ignores
+  SIGTERM, and any host left with `ppid == 1` is reaped at start.
+- **Rejected code signatures.** macOS caches a rejected signature against the
+  inode, so overwriting the file in place keeps the rejection — which is what
+  resource staging does. The C source is not part of the payload, so recovery
+  copies the binary to a fresh path under the state directory, which yields a
+  fresh inode and leaves a signed application bundle untouched.

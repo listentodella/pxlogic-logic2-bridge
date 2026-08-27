@@ -23,6 +23,8 @@ function createTauriApi() {
     hideStatusPanel: () => invoke('status_panel_hide'),
     toggleStatusPanel: () => invoke('status_panel_toggle'),
     completeOnboarding: () => invoke('onboarding_complete'),
+    runningLogicInstances: () => invoke('logic_running_instances'),
+    closeLogicInstances: pids => invoke('logic_close_instances', { pids }),
     onState: callback => void listen('bridge-state', event => callback(event.payload)),
     onTelemetry: callback => void listen('capture-telemetry', event => callback(event.payload)),
     onLog: callback => void listen('bridge-log', event => callback(event.payload)),
@@ -119,6 +121,11 @@ const elements = {
   wizardThreshold: document.querySelector('#wizard-threshold'),
   wizardThresholdVerified: document.querySelector('#wizard-threshold-verified'),
   readinessItems: Array.from(document.querySelectorAll('.readiness-item')),
+  logicRunningConfirmation: document.querySelector('#logic-running-confirmation'),
+  logicRunningMessage: document.querySelector('#logic-running-message'),
+  logicRunningCheckbox: document.querySelector('#logic-running-checkbox'),
+  cancelLogicRunningButton: document.querySelector('#cancel-logic-running-button'),
+  confirmLogicRunningButton: document.querySelector('#confirm-logic-running-button'),
 };
 
 let portMode = 'auto';
@@ -204,6 +211,71 @@ async function recordOnboardingComplete() {
 
 function finishWizard() {
   if (elements.wizard.open) elements.wizard.close();
+}
+
+/*
+ * Resolves a Logic window the Bridge would collide with.
+ *
+ * A running window cannot be handed to a new Bridge session: Logic reconnects to
+ * the address it was given but never rebuilds its device state in the fresh
+ * GraphServer, so the window looks connected while capture silently does nothing.
+ * Replacing it is the only reliable option, and closing someone's window can lose
+ * unsaved captures, so it only ever happens through this confirmation.
+ */
+async function resolveRunningLogic() {
+  if (typeof api.runningLogicInstances !== 'function') return true;
+  let instances;
+  try {
+    instances = await api.runningLogicInstances();
+  } catch (error) {
+    appendLog(`[client] 无法检查已运行的 Logic 2：${errorMessage(error)}`);
+    return true;
+  }
+  const blocking = instances || [];
+  if (!blocking.length) return true;
+
+  const pids = blocking.map(instance => instance.pid);
+  const described = blocking
+    .map(instance => (instance.graphPort ? `${instance.pid}（Bridge 启动）` : `${instance.pid}`))
+    .join('、');
+  elements.logicRunningMessage.textContent =
+    `检测到 ${pids.length} 个 Logic 2 窗口正在运行（pid ${described}）。`;
+  elements.logicRunningCheckbox.checked = false;
+  elements.confirmLogicRunningButton.disabled = true;
+  const accepted = await new Promise(resolve => {
+    const settle = value => {
+      elements.cancelLogicRunningButton.removeEventListener('click', onCancel);
+      elements.confirmLogicRunningButton.removeEventListener('click', onConfirm);
+      elements.logicRunningConfirmation.removeEventListener('close', onClose);
+      if (elements.logicRunningConfirmation.open) elements.logicRunningConfirmation.close();
+      resolve(value);
+    };
+    const onCancel = () => settle(false);
+    const onConfirm = () => {
+      if (!elements.logicRunningCheckbox.checked) return;
+      settle(true);
+    };
+    // Escape closes a <dialog> natively, which must count as declining.
+    const onClose = () => settle(false);
+    elements.cancelLogicRunningButton.addEventListener('click', onCancel);
+    elements.confirmLogicRunningButton.addEventListener('click', onConfirm);
+    elements.logicRunningConfirmation.addEventListener('close', onClose);
+    elements.logicRunningConfirmation.showModal();
+  });
+  if (!accepted) {
+    elements.footerMessage.textContent = '已取消启动：请先保存并关闭正在运行的 Logic 2';
+    return false;
+  }
+  try {
+    await api.closeLogicInstances(pids);
+    appendLog(`[client] 已关闭 Logic 2（pid ${pids.join(', ')}）`);
+  } catch (error) {
+    const message = errorMessage(error);
+    appendLog(`[client] ${message}`);
+    elements.footerMessage.textContent = message;
+    return false;
+  }
+  return true;
 }
 
 function isActive() {
@@ -1098,6 +1170,9 @@ for (const item of [...elements.readinessItems, ...document.querySelectorAll('.w
 }
 elements.experimentalConfirmationCheckbox.addEventListener('change', () => {
   elements.continueExperimentalButton.disabled = !elements.experimentalConfirmationCheckbox.checked;
+});
+elements.logicRunningCheckbox.addEventListener('change', () => {
+  elements.confirmLogicRunningButton.disabled = !elements.logicRunningCheckbox.checked;
 });elements.cancelExperimentalButton.addEventListener('click', () => {
   clearExperimentalConfirmation();
   elements.experimentalConfirmation.close();
@@ -1140,6 +1215,7 @@ elements.startButton.addEventListener('click', async () => {
     } else {
       if (!elements.pxlogicThreshold.reportValidity()) return;
       if (!requestExperimentalConfirmation()) return;
+      if (!await resolveRunningLogic()) return;
       const pendingProfileFingerprint = consumeExperimentalConfirmationFingerprint();
       const state = await api.start(readSettings(pendingProfileFingerprint));
       renderState(state);

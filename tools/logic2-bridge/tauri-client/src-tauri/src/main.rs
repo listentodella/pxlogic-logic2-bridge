@@ -3241,6 +3241,159 @@ fn onboarding_complete(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogicInstance {
+    pid: u32,
+    /// Present when the window was started by the Bridge with
+    /// `--useExistingGraph --graphPort N`. Only used to tell the user which
+    /// windows the Bridge is responsible for; every running window has to be
+    /// replaced either way, because Logic never rebuilds its device state in a
+    /// fresh GraphServer after reconnecting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph_port: Option<u16>,
+}
+
+/// Extracts Logic windows from a `ps -axo pid=,command=` listing.
+///
+/// Kept free of process access so every discriminator can be tested: the Bridge
+/// itself runs through this same binary in Node mode with a `.cjs` entry script,
+/// and Chromium spawns its helper processes from it too, so neither may be
+/// mistaken for a window that owns a graph connection.
+fn parse_logic_instances(listing: &str, executable: &str, self_pid: u32) -> Vec<LogicInstance> {
+    let mut instances = Vec::new();
+    for line in listing.lines() {
+        let trimmed = line.trim_start();
+        let Some((raw_pid, rest)) = trimmed.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = raw_pid.parse::<u32>() else {
+            continue;
+        };
+        if pid == self_pid {
+            continue;
+        }
+        let Some(arguments) = rest.trim_start().strip_prefix(executable) else {
+            continue;
+        };
+        // A longer path that merely starts with ours is a different binary.
+        if !(arguments.is_empty() || arguments.starts_with(char::is_whitespace)) {
+            continue;
+        }
+        let arguments = arguments.trim_start();
+        let first = arguments.split_whitespace().next().unwrap_or_default();
+        if first.ends_with(".cjs") || arguments.contains("--type=") {
+            continue;
+        }
+        let graph_port = arguments
+            .split_whitespace()
+            .skip_while(|argument| *argument != "--graphPort")
+            .nth(1)
+            .and_then(|value| value.parse::<u16>().ok());
+        instances.push(LogicInstance { pid, graph_port });
+    }
+    instances
+}
+
+#[cfg(unix)]
+fn running_logic_instances(executable: &Path) -> Vec<LogicInstance> {
+    let Ok(output) = Command::new("ps").args(["-axo", "pid=,command="]).output() else {
+        return Vec::new();
+    };
+    parse_logic_instances(
+        &String::from_utf8_lossy(&output.stdout),
+        &executable.to_string_lossy(),
+        std::process::id(),
+    )
+}
+
+#[cfg(not(unix))]
+fn running_logic_instances(_executable: &Path) -> Vec<LogicInstance> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn terminate_single_process(pid: u32, force: bool) -> Result<(), String> {
+    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+    if unsafe { libc::kill(pid as i32, signal) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error.to_string())
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+fn logic_executable_for_settings(app: &AppHandle) -> Result<PathBuf, String> {
+    let settings = load_settings(app);
+    let app_path = PathBuf::from(settings.logic_app_path.trim());
+    if app_path.as_os_str().is_empty() {
+        return Err("尚未选择 Logic 2 安装".to_string());
+    }
+    Ok(logic_executable(&resolve_logic_installation(&app_path)?))
+}
+
+/// Reports Logic windows the launcher would collide with. Every running window has
+/// to be replaced, so the renderer asks before starting and confirms closing them,
+/// which is destructive and must never happen silently.
+#[tauri::command]
+fn logic_running_instances(app: AppHandle) -> Result<Vec<LogicInstance>, String> {
+    Ok(running_logic_instances(&logic_executable_for_settings(
+        &app,
+    )?))
+}
+
+/// Closes Logic windows the user explicitly agreed to close. Politely first, then
+/// forcibly, because an unresponsive window would otherwise block every later
+/// Bridge start.
+#[cfg(unix)]
+#[tauri::command]
+async fn logic_close_instances(app: AppHandle, pids: Vec<u32>) -> Result<(), String> {
+    let executable = logic_executable_for_settings(&app)?;
+    // Only ever signal a pid that is still one of our Logic windows, so a stale
+    // list from the renderer cannot be turned into a kill of an unrelated process.
+    let known: HashSet<u32> = running_logic_instances(&executable)
+        .into_iter()
+        .map(|instance| instance.pid)
+        .collect();
+    let targets: Vec<u32> = pids.into_iter().filter(|pid| known.contains(pid)).collect();
+    for pid in &targets {
+        terminate_single_process(*pid, false)?;
+    }
+    for _ in 0..40 {
+        if targets.iter().all(|pid| !process_is_alive(*pid)) {
+            return Ok(());
+        }
+        tauri::async_runtime::spawn_blocking(|| thread::sleep(Duration::from_millis(250)))
+            .await
+            .map_err(|error| format!("等待 Logic 2 退出失败: {error}"))?;
+    }
+    for pid in &targets {
+        let _ = terminate_single_process(*pid, true);
+    }
+    for _ in 0..20 {
+        if targets.iter().all(|pid| !process_is_alive(*pid)) {
+            return Ok(());
+        }
+        tauri::async_runtime::spawn_blocking(|| thread::sleep(Duration::from_millis(250)))
+            .await
+            .map_err(|error| format!("等待 Logic 2 退出失败: {error}"))?;
+    }
+    Err("Logic 2 未能退出，请手动关闭后重试".to_string())
+}
+
+#[cfg(not(unix))]
+#[tauri::command]
+async fn logic_close_instances(_app: AppHandle, _pids: Vec<u32>) -> Result<(), String> {
+    Err("当前平台尚未实现关闭 Logic 2 实例".to_string())
+}
+
 #[tauri::command]
 fn client_save_settings(
     app: AppHandle,
@@ -3870,6 +4023,8 @@ fn main() {
             logic_inspect,
             logic_analyze,
             logic_browse,
+            logic_running_instances,
+            logic_close_instances,
             pxlogic_scan,
             bridge_start,
             bridge_restart,
@@ -4212,6 +4367,42 @@ mod tests {
         // Off every display, so there is nothing to snap to.
         let panel = status_panel_rect(-5000, 400);
         assert_eq!(work_area_under_panel(panel, &areas), None);
+    }
+
+    #[test]
+    fn tells_an_adoptable_logic_window_from_everything_else_that_shares_its_binary() {
+        const LOGIC: &str = "/Applications/Saleae Logic.app/Contents/MacOS/Logic";
+        // Real shapes seen on macOS: a window the Bridge started, one the user
+        // started, the Bridge itself running through the same binary in Node mode,
+        // Chromium's helper children, and an unrelated process.
+        let listing = format!(
+            "\
+  501 {LOGIC} --useExistingGraph --graphPort 63602 --start-maximized
+  502 {LOGIC}
+  503 {LOGIC} index.cjs --app /Applications/Saleae Logic.app --port auto
+  504 {LOGIC} --type=renderer --graphPort 63602
+  505 {LOGIC}Helper --type=gpu-process
+  506 /usr/bin/something else
+  507 {LOGIC} --graphPort notaport
+"
+        );
+        let instances = parse_logic_instances(&listing, LOGIC, 999);
+
+        assert_eq!(
+            instances
+                .iter()
+                .map(|instance| (instance.pid, instance.graph_port))
+                .collect::<Vec<_>>(),
+            vec![(501, Some(63602)), (502, None), (507, None)],
+            "only browser processes count, and only a real port makes one adoptable"
+        );
+
+        // The Bridge must never mistake itself for a window to close.
+        let instances = parse_logic_instances(&listing, LOGIC, 502);
+        assert!(
+            !instances.iter().any(|instance| instance.pid == 502),
+            "the current process is excluded"
+        );
     }
 
     #[test]
