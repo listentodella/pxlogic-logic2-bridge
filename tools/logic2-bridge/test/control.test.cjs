@@ -83,6 +83,35 @@ test('passes the Bridge hardware threshold to PXLogic without rescaling', () => 
   assert.equal(arguments_.includes('--prepare-only'), false);
 });
 
+test('asks PXLogic for one long stream rather than a chain of re-armed windows', () => {
+  const arguments_ = buildPxlogicHelperArguments({
+    captureWindowMs: 1000,
+    pxlogicDevice: 'usb:test',
+  }, {
+    enabledChannels: [0, 1, 2, 3],
+    sampleRateHz: 50_000_000,
+    thresholdVolts: 1.2,
+  });
+
+  // In stream mode the helper derives its sample count from this budget and
+  // re-opens the device, re-claims the interfaces and re-programs every capture
+  // register once it is spent. Each re-arm costs 13-14 ms during which the
+  // hardware produces nothing, and the samples either side are concatenated as if
+  // no time had passed, so anything spanning a re-arm is silently compressed.
+  // Measured at 50 MHz over four channels: 16 MiB gives 335 ms windows and 96%
+  // duty, 1 GiB covers a 20 second capture in one window at 100.0% duty.
+  const budget = Number(arguments_[arguments_.indexOf('--buffer-mb') + 1]);
+  assert.ok(Number.isInteger(budget), 'the stream sample budget must be explicit');
+  assert.ok(
+    budget >= 1024,
+    `a ${budget} MiB budget re-arms the stream mid-capture and distorts the timebase`,
+  );
+  // The budget is a target count, not an allocation: decoded samples leave
+  // through the cross-lane callback, so a large value costs no memory.
+  assert.ok(arguments_.includes('--live-cross-only'));
+  assert.equal(arguments_[arguments_.indexOf('--mode') + 1], 'stream');
+});
+
 test('prepares the selected PXLogic once outside the capture process', () => {
   assert.deepEqual(buildPxlogicPrepareArguments({ pxlogicDevice: 'usb:test' }), [
     '--device',

@@ -43,6 +43,24 @@ function parseThresholdVolts(description) {
   return volts;
 }
 
+/*
+ * Target sample budget for one stream capture, in MiB of decoded samples.
+ *
+ * In stream mode the helper derives its sample count from this budget, and it
+ * re-opens the device, re-claims the interfaces and re-programs every capture
+ * register once the budget is spent. Each of those re-arms costs 13-14 ms of real
+ * time during which the hardware produces nothing, and the samples either side
+ * are concatenated as if no time had passed - so every waveform feature spanning
+ * a re-arm is silently compressed, and everything after it is shifted earlier.
+ *
+ * Measured at 50 MHz over four digital channels: the default 16 MiB budget yields
+ * 335 ms windows and 96% duty, 256 MiB yields 99.7%, and 1 GiB covers a 20 second
+ * capture in a single window at 100.0% duty. The budget is a target count rather
+ * than an allocation - decoded samples leave through the cross-lane callback - so
+ * peak RSS stayed at 1-2 MB in every case.
+ */
+const PXLOGIC_STREAM_TARGET_MB = 4096;
+
 function physicalChannelSpan(enabledChannels) {
   return Math.max(...normalizeEnabledChannels(enabledChannels)) + 1;
 }
@@ -155,6 +173,8 @@ function buildPxlogicHelperArguments(options, captureSettings) {
     '--live-cross-only',
     '--mode',
     'stream',
+    '--buffer-mb',
+    String(PXLOGIC_STREAM_TARGET_MB),
     '--rate',
     String(sampleRateHz),
     '--vth',
