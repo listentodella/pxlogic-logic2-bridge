@@ -1,6 +1,6 @@
 {
   "name": "pxlogic-logic2-bridge",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "PXLogic live capture bridge for an unmodified official Saleae Logic app",
   "scripts": {
