@@ -164,6 +164,12 @@ test('an observer that never settles cannot stall the messages behind it', async
   // A hang is as fatal as a throw and just as quiet, so the wait is bounded too. The
   // teardown path that produced one in practice awaited a post-mortem USB scan with no
   // timeout while the forwarding chain waited on it.
+  //
+  // The observer here never settles, so this deadline is the only thing left with
+  // anything to do. It has to hold the event loop open to get the chance to fire:
+  // unref'd, as the session wants it, Node would find no remaining work, tear down,
+  // and leave the await below pending forever -- which is how this passed on a busy
+  // machine and hung in CI.
   const upstream = new FakeSocket();
   const complaints = [];
   const relay = new ClientFrameRelay(
@@ -171,6 +177,7 @@ test('an observer that never settles cannot stall the messages behind it', async
     text => (text === 'hang' ? new Promise(() => {}) : Promise.resolve(undefined)),
     message => complaints.push(message),
     25,
+    { keepObserverDeadlineAlive: true },
   );
 
   relay.push(maskedTextFrame('before'));
