@@ -1,0 +1,73 @@
+:root {
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #25272b;
+  background: #eef0f3;
+}
+* { box-sizing: border-box; }
+html, body { min-width: 340px; min-height: 340px; margin: 0; }
+body { background: #eef0f3; font-size: 12px; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+.panel-header {
+  display: flex; align-items: center; gap: 7px; min-height: 58px; padding: 9px 10px 9px 14px;
+  color: #fff; background: #25272b; border-bottom: 1px solid #151619; user-select: none;
+}
+.title-block { min-width: 0; flex: 1 1 auto; }
+.title-line { display: flex; align-items: center; gap: 7px; }
+.title-line strong { font-size: 13px; font-weight: 680; }
+.title-block > span { display: block; margin-top: 4px; overflow: hidden; color: #aeb3bb; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.state-dot { width: 8px; height: 8px; border-radius: 50%; background: #92979f; }
+.state-dot.ready { background: #43aa6c; box-shadow: 0 0 0 4px rgb(67 170 108 / 16%); }
+.state-dot.warning { background: #d69d23; }
+.icon-button { width: 27px; height: 27px; padding: 0; color: #c8ccd2; background: transparent; border: 1px solid #555a62; border-radius: 4px; font-size: 16px; }
+.icon-button:hover { color: #fff; border-color: #fff; }
+main { display: grid; gap: 10px; padding: 11px; }
+section { min-width: 0; background: #fff; border: 1px solid #d5d9df; border-radius: 7px; }
+.connection-card { padding: 10px 11px; }
+.connection-row { display: grid; grid-template-columns: 62px minmax(0, 1fr); align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.connection-row > span { color: #747a83; font-size: 10px; }
+.connection-row code, .connection-row strong { min-width: 0; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.up { color: #287947; } .down { color: #aa4b36; }
+.warning { margin: 8px 0; padding: 7px 8px; color: #7a4b0c; background: #fff6df; border: 1px solid #ebcf8d; border-radius: 4px; font-size: 10px; line-height: 1.45; }
+.help { margin: 6px 0 0; color: #737983; font-size: 10px; line-height: 1.45; }
+.registration-row { display: flex; gap: 7px; margin-top: 9px; }
+.registration-row code { min-width: 0; flex: 1 1 auto; padding: 7px 8px; overflow: hidden; background: #f4f5f7; border: 1px solid #d9dde2; border-radius: 4px; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
+.registration-row button { flex: 0 0 auto; padding: 0 9px; color: #334e78; background: #f7faff; border: 1px solid #afc2df; border-radius: 4px; font-size: 10px; }
+.auto-show { display: flex; align-items: center; gap: 6px; margin-top: 9px; color: #555b64; font-size: 10px; }
+.auto-show input { margin: 0; }
+.section-heading { display: flex; align-items: baseline; justify-content: space-between; padding: 9px 11px 7px; border-bottom: 1px solid #e2e5e9; }
+.section-heading h2 { margin: 0; font-size: 11px; font-weight: 680; }
+.section-heading span { color: #858b94; font-size: 9px; }
+.tool-list { display: flex; gap: 5px; padding: 8px 10px 10px; overflow-x: auto; }
+.tool-chip { flex: 0 0 auto; max-width: 190px; padding: 4px 7px; overflow: hidden; color: #4f5968; background: #f5f7fa; border: 1px solid #d9dee6; border-radius: 999px; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.activity-list { max-height: 275px; overflow: auto; }
+.activity { padding: 8px 10px; border-bottom: 1px solid #eceef1; }
+.activity:last-child { border-bottom: 0; }
+.activity-top { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 7px; }
+.activity-state { width: 7px; height: 7px; border-radius: 50%; background: #9ba1aa; }
+.activity-state.pending { background: #d69d23; }
+.activity-state.completed, .activity-state.notification { background: #43aa6c; }
+.activity-state.error, .activity-state.sessionClosed { background: #d24d38; }
+.activity-name { min-width: 0; overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.activity-time { color: #8a9098; font-size: 9px; }
+.activity-meta { margin: 4px 0 0 15px; overflow: hidden; color: #777d86; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+details { margin: 5px 0 0 15px; }
+details summary { color: #64738a; cursor: pointer; font-size: 9px; }
+details pre { max-height: 150px; margin: 5px 0 0; padding: 7px; overflow: auto; color: #3b424b; background: #f5f6f8; border-radius: 4px; font: 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.empty { margin: 0; padding: 12px; color: #8a9098; font-size: 10px; text-align: center; }
+.approval-section { border-color: #e2b65b; box-shadow: 0 0 0 2px rgb(226 182 91 / 15%); }
+.approval-card { padding: 10px 11px; border-bottom: 1px solid #ead9b8; }
+.approval-card:last-child { border-bottom: 0; }
+.approval-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.approval-heading strong { min-width: 0; overflow: hidden; color: #4a3518; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.approval-countdown { flex: 0 0 auto; color: #a05a20; font-size: 9px; font-variant-numeric: tabular-nums; }
+.approval-reason { margin: 6px 0; color: #675238; font-size: 10px; line-height: 1.45; }
+.approval-card pre { max-height: 110px; margin: 6px 0; padding: 7px; overflow: auto; color: #493f32; background: #fffaf0; border: 1px solid #ead9b8; border-radius: 4px; font: 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.approval-remember { display: flex; align-items: center; gap: 6px; color: #675f54; font-size: 9px; }
+.approval-remember input { margin: 0; }
+.approval-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 9px; }
+.approval-actions button { min-width: 66px; min-height: 28px; border-radius: 4px; font-size: 10px; font-weight: 650; }
+.deny-button { color: #8f3828; background: #fff; border: 1px solid #d69b90; }
+.allow-button { color: #fff; background: #337a4e; border: 1px solid #28653f; }
+.approval-error { min-height: 0; margin: 5px 0 0; color: #b3402e; font-size: 9px; }

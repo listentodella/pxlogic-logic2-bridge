@@ -22,6 +22,7 @@ function createTauriApi() {
     showStatusPanel: () => invoke('status_panel_show'),
     hideStatusPanel: () => invoke('status_panel_hide'),
     toggleStatusPanel: () => invoke('status_panel_toggle'),
+    showMcpWindow: () => invoke('mcp_window_show'),
     completeOnboarding: () => invoke('onboarding_complete'),
     runningLogicInstances: () => invoke('logic_running_instances'),
     closeLogicInstances: pids => invoke('logic_close_instances', { pids }),
@@ -108,6 +109,7 @@ const elements = {
   footerMessage: document.querySelector('#footer-message'),
   startButton: document.querySelector('#start-button'),
   statusPanelButton: document.querySelector('#status-panel-button'),
+  mcpPanelButton: document.querySelector('#mcp-panel-button'),
   onboardingButton: document.querySelector('#onboarding-button'),
   wizard: document.querySelector('#onboarding-wizard'),
   wizardStepIndex: document.querySelector('#wizard-step-index'),
@@ -1132,6 +1134,15 @@ elements.closeWarningButton.addEventListener('click', () => {
   elements.compatibilityWarning.close();
 });
 
+elements.mcpPanelButton.addEventListener('click', async () => {
+  if (typeof api.showMcpWindow !== 'function') return;
+  try {
+    await api.showMcpWindow();
+  } catch (error) {
+    appendLog(`[client] 无法显示 MCP 活动窗口：${errorMessage(error)}`);
+  }
+});
+
 elements.statusPanelButton.addEventListener('click', async () => {
   if (typeof api.toggleStatusPanel !== 'function') return;
   try {
@@ -1251,6 +1262,9 @@ if (typeof api.onTelemetry === 'function') api.onTelemetry(renderTelemetry);
 api.onLog(appendLog);
 
 async function initialize() {
+  if (typeof api.showMcpWindow === 'function') {
+    elements.mcpPanelButton.hidden = false;
+  }
   if (typeof api.toggleStatusPanel === 'function') {
     elements.statusPanelButton.hidden = false;
   }

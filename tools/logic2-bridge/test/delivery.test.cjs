@@ -688,3 +688,73 @@ test('every selectable firmware image is shipped and matches the manifest', () =
     );
   }
 });
+
+test('Logic 2 MCP proxy keeps its independent window and safety gate', () => {
+  const bridgeRoot = path.resolve(__dirname, '..');
+  const rendererRoot = path.join(bridgeRoot, 'client/renderer');
+  const tauriRoot = path.join(bridgeRoot, 'tauri-client/src-tauri');
+  const config = JSON.parse(fs.readFileSync(path.join(tauriRoot, 'tauri.conf.json'), 'utf8'));
+  const capability = JSON.parse(
+    fs.readFileSync(path.join(tauriRoot, 'capabilities/default.json'), 'utf8'),
+  );
+  const backend = fs.readFileSync(path.join(tauriRoot, 'src/main.rs'), 'utf8');
+  const proxy = fs.readFileSync(path.join(tauriRoot, 'src/mcp_proxy.rs'), 'utf8');
+  const index = fs.readFileSync(path.join(rendererRoot, 'index.html'), 'utf8');
+  const panel = fs.readFileSync(path.join(rendererRoot, 'mcp-panel.html'), 'utf8');
+  const script = fs.readFileSync(path.join(rendererRoot, 'mcp-panel.js'), 'utf8');
+  const packageJson = fs.readFileSync(path.join(bridgeRoot, 'package.json'), 'utf8');
+
+  const window = config.app.windows.find(candidate => candidate.label === 'mcp');
+  assert.ok(window, 'the MCP activity window must be packaged');
+  assert.equal(window.url, 'mcp-panel.html');
+  assert.equal(window.visible, false);
+  assert.equal(window.alwaysOnTop, true);
+  assert.equal(window.decorations, false);
+  assert.equal(window.resizable, true);
+  assert.equal(window.focus, false);
+  assert.ok(capability.windows.includes('mcp'));
+  assert.match(index, /id="mcp-panel-button"/);
+  assert.match(packageJson, /node --check client\/renderer\/mcp-panel\.js/);
+
+  // The proxy is application-scoped and starts in setup_app before the ordinary
+  // tray setup; it must not depend on a Bridge capture child process.
+  assert.match(backend, /fn setup_app[\s\S]*?start_mcp_proxy[\s\S]*?setup_tray/);
+  assert.match(backend, /DEFAULT_LISTEN_PORT/);
+  assert.match(proxy, /Ipv4Addr::LOCALHOST/);
+  assert.match(proxy, /Method::POST/);
+  assert.match(proxy, /Method::DELETE/);
+  assert.match(proxy, /text\/event-stream/);
+  assert.match(proxy, /mcp-session-id/);
+  assert.match(proxy, /reject_foreign_origin/);
+  assert.match(proxy, /MAX_OBSERVED_MESSAGE_BYTES/);
+
+  // The window exposes a generic transport URL and the real catalogue/activity,
+  // not a product-specific agent integration.
+  for (const id of [
+    'proxy-endpoint', 'fallback-warning', 'upstream-status', 'registration-value',
+    'tool-list', 'activity-list', 'approval-list',
+  ]) {
+    assert.match(panel, new RegExp(`id="${id}"`), `${id} must remain visible to the user`);
+  }
+  assert.match(panel, /Streamable HTTP/);
+  assert.match(script, /listen\('mcp-activity'/);
+  assert.match(script, /listen\('mcp-tools'/);
+  assert.match(script, /listen\('mcp-approval'/);
+  assert.match(script, /invoke\('mcp_approval_resolve'/);
+  assert.match(script, /本次 MCP 会话内该工具免问/);
+
+  // Capture lifecycle and every unknown future tool stop at the gate. The fixed
+  // timeout and matched JSON-RPC error keep an unattended call from hanging.
+  for (const tool of ['start_capture', 'load_capture', 'stop_capture', 'close_capture']) {
+    assert.match(backend, new RegExp(`"${tool}"`));
+  }
+  assert.match(backend, /尚未分类的 Logic 2 MCP 工具/);
+  assert.match(backend, /tokio::time::timeout\(Duration::from_secs\(30\), receiver\)/);
+  assert.match(proxy, /"code": -32000/);
+  assert.match(backend, /approvals\.close_session\(session_id\)/);
+
+  const trayStart = backend.indexOf('fn setup_tray');
+  const trayEnd = backend.indexOf('\nfn main()', trayStart);
+  const tray = backend.slice(trayStart, trayEnd);
+  assert.ok(!tray.includes('MCP'), 'the existing tray menu must not gain an MCP entry');
+});

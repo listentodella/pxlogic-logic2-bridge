@@ -1,16 +1,20 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod mcp_proxy;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fs,
+    future::Future,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
+    pin::Pin,
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -54,6 +58,8 @@ struct ClientSettings {
     guidance: GuidanceSettings,
     #[serde(default)]
     status_panel: StatusPanelSettings,
+    #[serde(default)]
+    mcp: McpSettings,
     // This one-shot UI authorization is bound to the inspected GraphServer
     // fingerprint and must never be persisted with the user's settings.
     #[serde(default, skip_serializing)]
@@ -112,6 +118,52 @@ impl Default for StatusPanelSettings {
     }
 }
 
+/// Ports for the MCP proxy that sits in front of Logic 2's own MCP server.
+///
+/// Backend-owned: the main window does not render them, and a renderer save must not
+/// reset a port an agent has already been registered against.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpSettings {
+    /// What the proxy tries to listen on. Fixed by default so a registration written
+    /// once keeps working; the bound port can still differ if it was taken.
+    #[serde(default = "default_mcp_listen_port")]
+    listen_port: u16,
+    /// Logic 2's MCP server, configurable in its Settings > Automation panel.
+    #[serde(default = "default_mcp_upstream_port")]
+    upstream_port: u16,
+    /// The window reveals itself for an approval regardless; this governs only whether it
+    /// opens on its own when the proxy first sees an agent.
+    #[serde(default = "default_mcp_auto_show")]
+    auto_show: bool,
+    /// Physical desktop pixels, independent of the capture status panel position.
+    #[serde(default)]
+    position: Option<PanelPosition>,
+}
+
+fn default_mcp_listen_port() -> u16 {
+    mcp_proxy::DEFAULT_LISTEN_PORT
+}
+
+fn default_mcp_upstream_port() -> u16 {
+    mcp_proxy::DEFAULT_UPSTREAM_PORT
+}
+
+fn default_mcp_auto_show() -> bool {
+    true
+}
+
+impl Default for McpSettings {
+    fn default() -> Self {
+        Self {
+            listen_port: default_mcp_listen_port(),
+            upstream_port: default_mcp_upstream_port(),
+            auto_show: default_mcp_auto_show(),
+            position: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ThresholdProfile {
@@ -145,6 +197,7 @@ impl Default for ClientSettings {
             pxlogic_firmware_id: default_pxlogic_firmware_id(),
             guidance: GuidanceSettings::default(),
             status_panel: StatusPanelSettings::default(),
+            mcp: McpSettings::default(),
             pending_profile_fingerprint: None,
         }
     }
@@ -182,6 +235,12 @@ impl ClientSettings {
         // A future build must never be treated as already onboarded.
         if self.guidance.onboarding_completed_version > ONBOARDING_VERSION {
             self.guidance.onboarding_completed_version = ONBOARDING_VERSION;
+        }
+        if self.mcp.listen_port == 0 {
+            self.mcp.listen_port = default_mcp_listen_port();
+        }
+        if self.mcp.upstream_port == 0 {
+            self.mcp.upstream_port = default_mcp_upstream_port();
         }
         self
     }
@@ -579,6 +638,8 @@ struct AppState {
     quitting: AtomicBool,
     /// Generation guard for the debounced status-panel move handler.
     panel_move_generation: AtomicU64,
+    /// Independent debounce generation for the MCP window.
+    mcp_move_generation: AtomicU64,
     /// Logical width of the expanded panel, remembered across a collapse so the
     /// chosen width survives the round trip. 0 means never measured.
     expanded_panel_width: AtomicU32,
@@ -592,6 +653,497 @@ struct AppState {
     /// Which edge the panel is resting on, so the layout is only re-flipped when it
     /// actually changes: 0 unknown, 1 anywhere else, 2 the bottom of the display.
     panel_dock: AtomicU8,
+    /// What the MCP proxy bound, once it has bound. `None` until then, and while it is
+    /// unavailable, which the window has to distinguish from "bound but idle".
+    mcp: Mutex<Option<McpRuntimeState>>,
+    /// A bounded activity feed plus the tools most recently advertised by Logic 2.
+    /// This belongs to the app, not a Bridge capture session, for real Saleae users too.
+    mcp_activity: Mutex<McpActivityStore>,
+    mcp_approvals: Mutex<McpApprovalStore>,
+    /// Prevent normal activity from repeatedly reopening a window the user hid.
+    mcp_auto_shown: AtomicBool,
+}
+
+/// The proxy's live state, as the window needs to see it.
+#[derive(Clone, Debug)]
+struct McpRuntimeState {
+    ports: mcp_proxy::BoundPorts,
+}
+
+const MAX_MCP_ACTIVITIES: usize = 200;
+
+type McpPendingKey = (Option<String>, String);
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct McpToolDefinition {
+    name: String,
+    description: Option<String>,
+    input_schema: serde_json::Value,
+    /// Preserve fields introduced by newer MCP/Logic 2 versions instead of reducing
+    /// the real tool catalogue to the subset this client happens to understand.
+    raw: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct McpActivity {
+    sequence: u64,
+    observed_at_ms: u64,
+    session_id: Option<String>,
+    request_id: Option<serde_json::Value>,
+    direction: String,
+    method: String,
+    tool: Option<String>,
+    arguments: Option<serde_json::Value>,
+    params: Option<serde_json::Value>,
+    state: String,
+    response: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct McpApprovalRequest {
+    approval_id: u64,
+    session_id: Option<String>,
+    request_id: serde_json::Value,
+    tool: String,
+    arguments: serde_json::Value,
+    reason: String,
+    created_at_ms: u64,
+    expires_at_ms: u64,
+}
+
+struct PendingMcpApproval {
+    request: McpApprovalRequest,
+    decision: tokio::sync::oneshot::Sender<mcp_proxy::Verdict>,
+}
+
+#[derive(Default)]
+struct McpApprovalStore {
+    next_id: u64,
+    pending: BTreeMap<u64, PendingMcpApproval>,
+    session_allowed: BTreeMap<String, HashSet<String>>,
+}
+
+impl McpApprovalStore {
+    fn is_session_allowed(&self, context: &mcp_proxy::ObservationContext, tool: &str) -> bool {
+        context
+            .session_id
+            .as_ref()
+            .and_then(|session| self.session_allowed.get(session))
+            .is_some_and(|tools| tools.contains(tool))
+    }
+
+    fn create(
+        &mut self,
+        context: &mcp_proxy::ObservationContext,
+        call: &mcp_proxy::ToolCall,
+        reason: String,
+        now: u64,
+    ) -> (
+        McpApprovalRequest,
+        tokio::sync::oneshot::Receiver<mcp_proxy::Verdict>,
+    ) {
+        self.next_id = self.next_id.saturating_add(1);
+        let request = McpApprovalRequest {
+            approval_id: self.next_id,
+            session_id: context.session_id.clone(),
+            request_id: call.id.clone(),
+            tool: call.tool.clone(),
+            arguments: call.arguments.clone(),
+            reason,
+            created_at_ms: now,
+            expires_at_ms: now.saturating_add(30_000),
+        };
+        let (decision, receiver) = tokio::sync::oneshot::channel();
+        self.pending.insert(
+            request.approval_id,
+            PendingMcpApproval {
+                request: request.clone(),
+                decision,
+            },
+        );
+        (request, receiver)
+    }
+
+    fn resolve(
+        &mut self,
+        approval_id: u64,
+        allow: bool,
+        remember: bool,
+    ) -> Option<McpApprovalRequest> {
+        let pending = self.pending.remove(&approval_id)?;
+        if allow && remember {
+            if let Some(session) = pending.request.session_id.as_ref() {
+                self.session_allowed
+                    .entry(session.clone())
+                    .or_default()
+                    .insert(pending.request.tool.clone());
+            }
+        }
+        let verdict = if allow {
+            mcp_proxy::Verdict::Allow
+        } else {
+            mcp_proxy::Verdict::Deny("用户拒绝了 MCP 工具调用".to_string())
+        };
+        let _ = pending.decision.send(verdict);
+        Some(pending.request)
+    }
+
+    fn expire(&mut self, approval_id: u64) -> Option<McpApprovalRequest> {
+        self.pending
+            .remove(&approval_id)
+            .map(|pending| pending.request)
+    }
+
+    fn close_session(&mut self, session_id: &str) {
+        self.session_allowed.remove(session_id);
+        let ids: Vec<u64> = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.request.session_id.as_deref() == Some(session_id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            if let Some(pending) = self.pending.remove(&id) {
+                let _ = pending.decision.send(mcp_proxy::Verdict::Deny(
+                    "MCP 会话已结束，工具调用已拒绝".to_string(),
+                ));
+            }
+        }
+    }
+
+    fn pending_requests(&self) -> Vec<McpApprovalRequest> {
+        self.pending
+            .values()
+            .map(|pending| pending.request.clone())
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpApprovalResolution {
+    approval_id: u64,
+    outcome: String,
+}
+
+enum McpToolPolicy {
+    Allow,
+    Review(String),
+}
+
+fn mcp_tool_policy(tool: &str) -> McpToolPolicy {
+    // Names below are the tools exposed by the current Logic 2 MCP integration. The
+    // catalogue captured from tools/list remains the source of truth shown in the UI;
+    // this deliberately small allow-list cannot accidentally bless a new tool.
+    match tool {
+        // Read-only inspection and export/save operations do not replace the current
+        // capture in Logic 2.
+        "get_devices"
+        | "wait_capture"
+        | "export_data_table_csv"
+        | "export_raw_data_binary"
+        | "export_raw_data_csv"
+        | "legacy_export_analyzer"
+        | "save_capture" => McpToolPolicy::Allow,
+        // Analyzer changes are explicitly permitted configuration operations.
+        "add_analyzer"
+        | "remove_analyzer"
+        | "add_high_level_analyzer"
+        | "remove_high_level_analyzer" => McpToolPolicy::Allow,
+        "start_capture" => {
+            McpToolPolicy::Review("启动新采集可能替换或改变当前采集状态".to_string())
+        }
+        "load_capture" => {
+            McpToolPolicy::Review("加载采集会切换 Logic 2 当前显示的数据".to_string())
+        }
+        "stop_capture" => McpToolPolicy::Review("停止采集可能截断尚在进行的数据".to_string()),
+        "close_capture" => McpToolPolicy::Review("关闭采集可能丢失尚未保存的数据".to_string()),
+        _ => McpToolPolicy::Review("这是尚未分类的 Logic 2 MCP 工具，默认需要确认".to_string()),
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpActivitySnapshot {
+    activities: Vec<McpActivity>,
+    tools: Vec<McpToolDefinition>,
+    approvals: Vec<McpApprovalRequest>,
+}
+
+#[derive(Default)]
+struct McpActivityStore {
+    next_sequence: u64,
+    activities: VecDeque<McpActivity>,
+    pending: BTreeMap<McpPendingKey, u64>,
+    tools: BTreeMap<String, McpToolDefinition>,
+}
+
+struct McpActivityUpdate {
+    activity: Option<McpActivity>,
+    tools: Option<Vec<McpToolDefinition>>,
+}
+
+impl McpActivityStore {
+    fn snapshot(&self) -> McpActivitySnapshot {
+        McpActivitySnapshot {
+            activities: self.activities.iter().cloned().collect(),
+            tools: self.tools.values().cloned().collect(),
+            approvals: Vec::new(),
+        }
+    }
+
+    fn next_sequence(&mut self) -> u64 {
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.next_sequence
+    }
+
+    fn push(&mut self, activity: McpActivity) {
+        self.activities.push_back(activity);
+        while self.activities.len() > MAX_MCP_ACTIVITIES {
+            if let Some(removed) = self.activities.pop_front() {
+                self.pending
+                    .retain(|_, sequence| *sequence != removed.sequence);
+            }
+        }
+    }
+
+    fn record_request(
+        &mut self,
+        context: &mcp_proxy::ObservationContext,
+        body: &[u8],
+        observed_at_ms: u64,
+    ) -> Option<McpActivity> {
+        let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+        let method = value.get("method")?.as_str()?.to_owned();
+        let request_id = value.get("id").filter(|id| !id.is_null()).cloned();
+        let params = value.get("params").cloned();
+        let tool = (method == "tools/call")
+            .then(|| params.as_ref()?.get("name")?.as_str().map(str::to_owned))
+            .flatten();
+        let arguments = (method == "tools/call")
+            .then(|| params.as_ref()?.get("arguments").cloned())
+            .flatten();
+        let sequence = self.next_sequence();
+        let activity = McpActivity {
+            sequence,
+            observed_at_ms,
+            session_id: context.session_id.clone(),
+            request_id: request_id.clone(),
+            direction: "client".to_string(),
+            method,
+            tool,
+            arguments,
+            params,
+            state: if request_id.is_some() {
+                "pending".to_string()
+            } else {
+                "notification".to_string()
+            },
+            response: None,
+        };
+        if let Some(id) = request_id.as_ref() {
+            if let Some(key) = mcp_pending_key(context, id) {
+                self.pending.insert(key, sequence);
+            }
+        }
+        self.push(activity.clone());
+        Some(activity)
+    }
+
+    fn record_response(
+        &mut self,
+        context: &mcp_proxy::ObservationContext,
+        body: &[u8],
+        observed_at_ms: u64,
+    ) -> McpActivityUpdate {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return McpActivityUpdate {
+                activity: None,
+                tools: None,
+            };
+        };
+
+        // Server notifications and requests carry a method of their own rather than
+        // answering an earlier client id.
+        if let Some(method) = value.get("method").and_then(serde_json::Value::as_str) {
+            let sequence = self.next_sequence();
+            let activity = McpActivity {
+                sequence,
+                observed_at_ms,
+                session_id: context.session_id.clone(),
+                request_id: value.get("id").cloned(),
+                direction: "server".to_string(),
+                method: method.to_owned(),
+                tool: None,
+                arguments: None,
+                params: value.get("params").cloned(),
+                state: "notification".to_string(),
+                response: None,
+            };
+            self.push(activity.clone());
+            return McpActivityUpdate {
+                activity: Some(activity),
+                tools: None,
+            };
+        }
+
+        let Some(id) = value.get("id").filter(|id| !id.is_null()).cloned() else {
+            return McpActivityUpdate {
+                activity: None,
+                tools: None,
+            };
+        };
+        let id_text = serde_json::to_string(&id).ok();
+        let exact_key = id_text
+            .as_ref()
+            .map(|id| (context.session_id.clone(), id.clone()));
+        let mut sequence = exact_key.as_ref().and_then(|key| self.pending.remove(key));
+        if sequence.is_none() {
+            // Initialization can acquire its session id in the response, while its
+            // request had none. Pair by id only when that is unambiguous.
+            if let Some(id_text) = id_text.as_ref() {
+                let matches: Vec<_> = self
+                    .pending
+                    .keys()
+                    .filter(|(_, pending_id)| pending_id == id_text)
+                    .cloned()
+                    .collect();
+                if matches.len() == 1 {
+                    sequence = self.pending.remove(&matches[0]);
+                }
+            }
+        }
+
+        let mut tools_update = None;
+        if let Some(sequence) = sequence {
+            if let Some(activity) = self
+                .activities
+                .iter_mut()
+                .find(|activity| activity.sequence == sequence)
+            {
+                activity.observed_at_ms = observed_at_ms;
+                if activity.session_id.is_none() {
+                    activity.session_id.clone_from(&context.session_id);
+                }
+                activity.state = if value.get("error").is_some() {
+                    "error".to_string()
+                } else {
+                    "completed".to_string()
+                };
+                activity.response = Some(value.clone());
+                if activity.method == "tools/list" {
+                    if let Some(listed) = parse_mcp_tools(&value) {
+                        let is_first_page = activity
+                            .params
+                            .as_ref()
+                            .and_then(|params| params.get("cursor"))
+                            .is_none_or(serde_json::Value::is_null);
+                        if is_first_page {
+                            self.tools.clear();
+                        }
+                        for tool in listed {
+                            self.tools.insert(tool.name.clone(), tool);
+                        }
+                        tools_update = Some(self.tools.values().cloned().collect());
+                    }
+                }
+                return McpActivityUpdate {
+                    activity: Some(activity.clone()),
+                    tools: tools_update,
+                };
+            }
+        }
+
+        let sequence = self.next_sequence();
+        let activity = McpActivity {
+            sequence,
+            observed_at_ms,
+            session_id: context.session_id.clone(),
+            request_id: Some(id),
+            direction: "server".to_string(),
+            method: "response".to_string(),
+            tool: None,
+            arguments: None,
+            params: None,
+            state: if value.get("error").is_some() {
+                "error".to_string()
+            } else {
+                "completed".to_string()
+            },
+            response: Some(value),
+        };
+        self.push(activity.clone());
+        McpActivityUpdate {
+            activity: Some(activity),
+            tools: None,
+        }
+    }
+
+    fn close_session(&mut self, session_id: &str, observed_at_ms: u64) -> Vec<McpActivity> {
+        let sequences: Vec<u64> = self
+            .pending
+            .iter()
+            .filter(|((session, _), _)| session.as_deref() == Some(session_id))
+            .map(|(_, sequence)| *sequence)
+            .collect();
+        self.pending
+            .retain(|(session, _), _| session.as_deref() != Some(session_id));
+        let mut changed = Vec::new();
+        for sequence in sequences {
+            if let Some(activity) = self
+                .activities
+                .iter_mut()
+                .find(|activity| activity.sequence == sequence)
+            {
+                activity.observed_at_ms = observed_at_ms;
+                activity.state = "sessionClosed".to_string();
+                changed.push(activity.clone());
+            }
+        }
+        changed
+    }
+}
+
+fn mcp_pending_key(
+    context: &mcp_proxy::ObservationContext,
+    id: &serde_json::Value,
+) -> Option<McpPendingKey> {
+    serde_json::to_string(id)
+        .ok()
+        .map(|id| (context.session_id.clone(), id))
+}
+
+fn parse_mcp_tools(response: &serde_json::Value) -> Option<Vec<McpToolDefinition>> {
+    let tools = response.get("result")?.get("tools")?.as_array()?;
+    Some(
+        tools
+            .iter()
+            .filter_map(|raw| {
+                Some(McpToolDefinition {
+                    name: raw.get("name")?.as_str()?.to_owned(),
+                    description: raw
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    input_schema: raw
+                        .get("inputSchema")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                    raw: raw.clone(),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
 /// Tells the panel which way round to lay itself out.
@@ -607,8 +1159,9 @@ struct StatusPanelDock {
 /// than by coordinates handed over from the renderer: the Bridge reads the live
 /// cursor on every step, so a coalesced, dropped or out-of-order move event
 /// cannot accumulate drift.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct PanelDragAnchor {
+    window_label: String,
     window_x: i32,
     window_y: i32,
     cursor_x: f64,
@@ -627,10 +1180,15 @@ impl Default for AppState {
             next_token: AtomicU64::new(1),
             quitting: AtomicBool::new(false),
             panel_move_generation: AtomicU64::new(0),
+            mcp_move_generation: AtomicU64::new(0),
             expanded_panel_width: AtomicU32::new(0),
             expanded_panel_height: AtomicU32::new(0),
             panel_drag: Mutex::new(None),
             panel_dock: AtomicU8::new(0),
+            mcp: Mutex::new(None),
+            mcp_activity: Mutex::new(McpActivityStore::default()),
+            mcp_approvals: Mutex::new(McpApprovalStore::default()),
+            mcp_auto_shown: AtomicBool::new(false),
         }
     }
 }
@@ -3429,6 +3987,100 @@ fn schedule_status_panel_settle(window: &tauri::WebviewWindow) {
     });
 }
 
+fn persist_mcp_window_position(app: &AppHandle, position: PanelPosition) {
+    let mut settings = load_settings(app);
+    if settings.mcp.position == Some(position) {
+        return;
+    }
+    settings.mcp.position = Some(position);
+    let _ = store_settings(app, settings);
+}
+
+fn settle_mcp_window(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let Some(rect) = panel_rect(window) else {
+        return;
+    };
+    let (x, y) = clamp_panel_position(rect, &panel_work_areas(window));
+    if (x, y) != (rect.x, rect.y) {
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    persist_mcp_window_position(app, PanelPosition { x, y });
+}
+
+fn schedule_mcp_window_settle(window: &tauri::WebviewWindow) {
+    let app = window.app_handle().clone();
+    let generation = app
+        .state::<AppState>()
+        .mcp_move_generation
+        .fetch_add(1, Ordering::AcqRel)
+        + 1;
+    let window = window.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(STATUS_PANEL_SETTLE_MS));
+        if app
+            .state::<AppState>()
+            .mcp_move_generation
+            .load(Ordering::Acquire)
+            != generation
+        {
+            return;
+        }
+        let settle_app = app.clone();
+        let _ = app.run_on_main_thread(move || settle_mcp_window(&settle_app, &window));
+    });
+}
+
+fn show_mcp_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("mcp") {
+        restore_status_panel_position(&window, load_settings(app).mcp.position);
+        let _ = window.show();
+        let _ = window.set_always_on_top(true);
+        // Deliberately no set_focus: agent activity and approvals may reveal this over
+        // Logic 2, but typing and shortcuts must stay in the app the user is operating.
+    }
+}
+
+fn hide_mcp_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("mcp") {
+        let _ = window.hide();
+    }
+}
+
+#[tauri::command]
+fn mcp_window_show(app: AppHandle) {
+    show_mcp_window(&app);
+}
+
+#[tauri::command]
+fn mcp_window_hide(app: AppHandle) {
+    hide_mcp_window(&app);
+}
+
+#[tauri::command]
+fn mcp_window_begin_move(app: AppHandle) -> Result<(), String> {
+    panel_begin_move(&app, "mcp")
+}
+
+#[tauri::command]
+fn mcp_window_move(app: AppHandle) {
+    panel_move(&app, "mcp");
+}
+
+#[tauri::command]
+fn mcp_window_end_move(app: AppHandle) {
+    panel_end_move(&app, "mcp");
+}
+
+#[tauri::command]
+fn mcp_set_auto_show(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = load_settings(&app);
+    if settings.mcp.auto_show == enabled {
+        return Ok(());
+    }
+    settings.mcp.auto_show = enabled;
+    store_settings(&app, settings).map(|_| ())
+}
+
 fn show_main_window(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
@@ -3533,19 +4185,19 @@ fn status_panel_set_collapsed(app: AppHandle, collapsed: bool) -> Result<(), Str
 /// readout and discards the position the user was aiming for. Driving the move
 /// from here avoids that entirely, and is also the only way to hold the panel
 /// fully on the work area while it is moving.
-#[tauri::command]
-fn status_panel_begin_move(app: AppHandle) -> Result<(), String> {
-    let Some(window) = app.get_webview_window("status") else {
-        return Err("状态面板窗口不可用".to_string());
+fn panel_begin_move(app: &AppHandle, window_label: &str) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(window_label) else {
+        return Err(format!("窗口 {window_label} 不可用"));
     };
     let position = window
         .outer_position()
-        .map_err(|error| format!("无法读取状态面板位置: {error}"))?;
+        .map_err(|error| format!("无法读取窗口位置: {error}"))?;
     let cursor = app
         .cursor_position()
         .map_err(|error| format!("无法读取光标位置: {error}"))?;
     if let Ok(mut drag) = app.state::<AppState>().panel_drag.lock() {
         *drag = Some(PanelDragAnchor {
+            window_label: window_label.to_string(),
             window_x: position.x,
             window_y: position.y,
             cursor_x: cursor.x,
@@ -3555,13 +4207,8 @@ fn status_panel_begin_move(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Moves the panel to wherever the cursor has travelled since the drag began.
-/// Called once per pointer move; a move that arrives with no drag in progress is
-/// ignored rather than treated as an error, because the release and the last move
-/// can cross paths.
-#[tauri::command]
-fn status_panel_move(app: AppHandle) {
-    let Some(window) = app.get_webview_window("status") else {
+fn panel_move(app: &AppHandle, window_label: &str) {
+    let Some(window) = app.get_webview_window(window_label) else {
         return;
     };
     let Some(anchor) = app
@@ -3569,7 +4216,8 @@ fn status_panel_move(app: AppHandle) {
         .panel_drag
         .lock()
         .ok()
-        .and_then(|drag| *drag)
+        .and_then(|drag| drag.clone())
+        .filter(|anchor| anchor.window_label == window_label)
     else {
         return;
     };
@@ -3586,14 +4234,35 @@ fn status_panel_move(app: AppHandle) {
     if (x, y) != (rect.x, rect.y) {
         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
     }
-    sync_status_panel_dock(&app, &window);
+    if window_label == "status" {
+        sync_status_panel_dock(app, &window);
+    }
+}
+
+fn panel_end_move(app: &AppHandle, window_label: &str) {
+    if let Ok(mut drag) = app.state::<AppState>().panel_drag.lock() {
+        if drag
+            .as_ref()
+            .is_some_and(|anchor| anchor.window_label == window_label)
+        {
+            *drag = None;
+        }
+    }
+}
+
+#[tauri::command]
+fn status_panel_begin_move(app: AppHandle) -> Result<(), String> {
+    panel_begin_move(&app, "status")
+}
+
+#[tauri::command]
+fn status_panel_move(app: AppHandle) {
+    panel_move(&app, "status");
 }
 
 #[tauri::command]
 fn status_panel_end_move(app: AppHandle) {
-    if let Ok(mut drag) = app.state::<AppState>().panel_drag.lock() {
-        *drag = None;
-    }
+    panel_end_move(&app, "status");
 }
 
 /// Read once as the panel loads. The change event covers everything afterwards,
@@ -3787,6 +4456,7 @@ fn merge_backend_owned_settings(
 ) -> ClientSettings {
     incoming.guidance = current.guidance.clone();
     incoming.status_panel = current.status_panel.clone();
+    incoming.mcp = current.mcp.clone();
     incoming
 }
 
@@ -4544,6 +5214,292 @@ fn manual_open(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Reports the proxy's address so the window can show it, and so the registration
+/// command it offers names a port that is actually listening.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpStatus {
+    /// `None` until the proxy has bound, and if binding failed outright.
+    listen_port: Option<u16>,
+    requested_listen_port: u16,
+    upstream_port: u16,
+    /// True when the preferred port was taken. The window says so out loud, because an
+    /// agent registered against the preferred port would quietly fail to connect.
+    fell_back: bool,
+    /// Whether anything is listening on Logic 2's MCP port right now.
+    upstream_reachable: bool,
+    auto_show: bool,
+}
+
+/// How often the upstream check runs. Logic 2's MCP server can be switched on and off
+/// while the app watches, and a stale "not enabled" would send the user hunting.
+const MCP_UPSTREAM_POLL: Duration = Duration::from_secs(3);
+
+fn mcp_status_snapshot(app: &AppHandle, upstream_reachable: bool) -> McpStatus {
+    let settings = load_settings(app).mcp;
+    let bound = app
+        .state::<AppState>()
+        .mcp
+        .lock()
+        .ok()
+        .and_then(|state| state.as_ref().map(|state| state.ports));
+    McpStatus {
+        listen_port: bound.map(|ports| ports.listen_port),
+        requested_listen_port: bound
+            .map_or(settings.listen_port, |ports| ports.requested_listen_port),
+        upstream_port: bound.map_or(settings.upstream_port, |ports| ports.upstream_port),
+        fell_back: bound.is_some_and(|ports| ports.fell_back()),
+        upstream_reachable,
+        auto_show: settings.auto_show,
+    }
+}
+
+/// Observes the proxied traffic on behalf of the app.
+///
+/// Task 1 keeps it transparent: nothing is reported and nothing is refused. It exists
+/// now so the activity feed and the approval gate have a seam to grow into rather than
+/// the forwarding path being edited later.
+struct TauriProxyObserver {
+    app: AppHandle,
+}
+
+impl mcp_proxy::ProxyObserver for TauriProxyObserver {
+    fn observe_request(&self, context: &mcp_proxy::ObservationContext, body: &[u8]) {
+        let state = self.app.state::<AppState>();
+        if load_settings(&self.app).mcp.auto_show
+            && !state.mcp_auto_shown.swap(true, Ordering::AcqRel)
+        {
+            show_mcp_window(&self.app);
+        }
+        let activity = state
+            .mcp_activity
+            .lock()
+            .ok()
+            .and_then(|mut store| store.record_request(context, body, unix_time_millis()));
+        if let Some(activity) = activity {
+            let _ = self.app.emit("mcp-activity", activity);
+        }
+    }
+
+    fn observe_response(&self, context: &mcp_proxy::ObservationContext, body: &[u8]) {
+        let update = self
+            .app
+            .state::<AppState>()
+            .mcp_activity
+            .lock()
+            .ok()
+            .map(|mut store| store.record_response(context, body, unix_time_millis()));
+        if let Some(update) = update {
+            if let Some(activity) = update.activity {
+                let _ = self.app.emit("mcp-activity", activity);
+            }
+            if let Some(tools) = update.tools {
+                let _ = self.app.emit("mcp-tools", tools);
+            }
+        }
+    }
+
+    fn review<'a>(
+        &'a self,
+        context: &'a mcp_proxy::ObservationContext,
+        call: &'a mcp_proxy::ToolCall,
+    ) -> Pin<Box<dyn Future<Output = mcp_proxy::Verdict> + Send + 'a>> {
+        let app = self.app.clone();
+        let context = context.clone();
+        let call = call.clone();
+        Box::pin(async move {
+            let reason = match mcp_tool_policy(&call.tool) {
+                McpToolPolicy::Allow => return mcp_proxy::Verdict::Allow,
+                McpToolPolicy::Review(reason) => reason,
+            };
+            let state = app.state::<AppState>();
+            let already_allowed = state
+                .mcp_approvals
+                .lock()
+                .map(|approvals| approvals.is_session_allowed(&context, &call.tool))
+                .unwrap_or(false);
+            if already_allowed {
+                return mcp_proxy::Verdict::Allow;
+            }
+            let Some((request, receiver)) =
+                state.mcp_approvals.lock().ok().map(|mut approvals| {
+                    approvals.create(&context, &call, reason, unix_time_millis())
+                })
+            else {
+                return mcp_proxy::Verdict::Deny("无法建立 MCP 审批请求".to_string());
+            };
+            show_mcp_window(&app);
+            let _ = app.emit("mcp-approval", &request);
+            match tokio::time::timeout(Duration::from_secs(30), receiver).await {
+                Ok(Ok(verdict)) => verdict,
+                _ => {
+                    if let Ok(mut approvals) = app.state::<AppState>().mcp_approvals.lock() {
+                        approvals.expire(request.approval_id);
+                    }
+                    let _ = app.emit(
+                        "mcp-approval-resolved",
+                        McpApprovalResolution {
+                            approval_id: request.approval_id,
+                            outcome: "timeout".to_string(),
+                        },
+                    );
+                    mcp_proxy::Verdict::Deny(
+                        "MCP 工具调用等待确认超时（30 秒），已拒绝".to_string(),
+                    )
+                }
+            }
+        })
+    }
+
+    fn observe_session_closed(&self, context: &mcp_proxy::ObservationContext) {
+        let Some(session_id) = context.session_id.as_deref() else {
+            return;
+        };
+        if let Ok(mut approvals) = self.app.state::<AppState>().mcp_approvals.lock() {
+            approvals.close_session(session_id);
+        }
+        let changed = self
+            .app
+            .state::<AppState>()
+            .mcp_activity
+            .lock()
+            .map(|mut store| store.close_session(session_id, unix_time_millis()))
+            .unwrap_or_default();
+        for activity in changed {
+            let _ = self.app.emit("mcp-activity", activity);
+        }
+    }
+}
+
+/// Starts the proxy on its own thread with its own runtime.
+///
+/// A dedicated runtime rather than Tauri's: the proxy needs tokio's IO and timer drivers,
+/// and depending on which features Tauri happens to enable for its own runtime would make
+/// this fragile for no benefit.
+fn start_mcp_proxy(app: &AppHandle) {
+    let app = app.clone();
+    thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                append_log(&app, "client", &format!("MCP 代理无法启动运行时: {error}"));
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            let settings = load_settings(&app).mcp;
+            let (listener, listen_port) = match mcp_proxy::bind_listener(settings.listen_port).await
+            {
+                Ok(bound) => bound,
+                Err(error) => {
+                    append_log(&app, "client", &format!("MCP 代理无法监听端口: {error}"));
+                    return;
+                }
+            };
+            let ports = mcp_proxy::BoundPorts {
+                requested_listen_port: settings.listen_port,
+                listen_port,
+                upstream_port: settings.upstream_port,
+            };
+            if let Ok(mut state) = app.state::<AppState>().mcp.lock() {
+                *state = Some(McpRuntimeState { ports });
+            }
+            append_log(
+                &app,
+                "client",
+                &format!(
+                    "MCP 代理就绪: http://127.0.0.1:{} -> 127.0.0.1:{}{}",
+                    ports.listen_port,
+                    ports.upstream_port,
+                    if ports.fell_back() {
+                        format!("（首选端口 {} 被占用）", ports.requested_listen_port)
+                    } else {
+                        String::new()
+                    },
+                ),
+            );
+            let poll_app = app.clone();
+            let upstream_port = ports.upstream_port;
+            tokio::spawn(async move {
+                // Emitted only when the answer changes, so an idle app is silent.
+                let mut previous: Option<bool> = None;
+                loop {
+                    let reachable = mcp_proxy::upstream_reachable(upstream_port).await;
+                    if previous != Some(reachable) {
+                        previous = Some(reachable);
+                        let status = mcp_status_snapshot(&poll_app, reachable);
+                        let _ = poll_app.emit("mcp-status", status);
+                    }
+                    tokio::time::sleep(MCP_UPSTREAM_POLL).await;
+                }
+            });
+            let observer = Arc::new(TauriProxyObserver { app: app.clone() });
+            let proxy = Arc::new(mcp_proxy::ProxyRuntime::new(ports.upstream_port, observer));
+            mcp_proxy::serve(listener, proxy).await;
+        });
+    });
+}
+
+#[tauri::command]
+async fn mcp_status(app: AppHandle) -> McpStatus {
+    let upstream_port = load_settings(&app).mcp.upstream_port;
+    let reachable = mcp_proxy::upstream_reachable(upstream_port).await;
+    mcp_status_snapshot(&app, reachable)
+}
+
+#[tauri::command]
+fn mcp_activity_snapshot(state: tauri::State<'_, AppState>) -> McpActivitySnapshot {
+    let mut snapshot = state
+        .mcp_activity
+        .lock()
+        .map(|store| store.snapshot())
+        .unwrap_or(McpActivitySnapshot {
+            activities: Vec::new(),
+            tools: Vec::new(),
+            approvals: Vec::new(),
+        });
+    snapshot.approvals = state
+        .mcp_approvals
+        .lock()
+        .map(|approvals| approvals.pending_requests())
+        .unwrap_or_default();
+    snapshot
+}
+
+#[tauri::command]
+fn mcp_approval_resolve(
+    app: AppHandle,
+    approval_id: u64,
+    allow: bool,
+    remember: bool,
+) -> Result<(), String> {
+    let request = app
+        .state::<AppState>()
+        .mcp_approvals
+        .lock()
+        .map_err(|_| "MCP 审批状态不可用".to_string())?
+        .resolve(approval_id, allow, remember)
+        .ok_or_else(|| "该 MCP 审批已处理或超时".to_string())?;
+    let _ = app.emit(
+        "mcp-approval-resolved",
+        McpApprovalResolution {
+            approval_id: request.approval_id,
+            outcome: if allow { "allowed" } else { "denied" }.to_string(),
+        },
+    );
+    Ok(())
+}
+
+fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // The proxy is started before the tray so a failure to listen is logged while the
+    // app is still coming up, rather than looking like a later fault.
+    start_mcp_proxy(&app.handle().clone());
+    setup_tray(app)
+}
+
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let menu = MenuBuilder::new(app)
         .text("show", "显示 PXLogic Bridge")
@@ -4622,16 +5578,31 @@ fn main() {
             status_panel_dock_edge,
             status_panel_fit_height,
             status_panel_set_threshold,
+            mcp_status,
+            mcp_activity_snapshot,
+            mcp_approval_resolve,
+            mcp_window_show,
+            mcp_window_hide,
+            mcp_window_begin_move,
+            mcp_window_move,
+            mcp_window_end_move,
+            mcp_set_auto_show,
             status_panel_intro_acknowledge,
             status_panel_set_auto_show,
             onboarding_complete,
             main_window_show,
         ])
-        .setup(setup_tray)
+        .setup(setup_app)
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::Moved(_)) && window.label() == "status" {
                 if let Some(status) = window.app_handle().get_webview_window("status") {
                     schedule_status_panel_settle(&status);
+                }
+                return;
+            }
+            if matches!(event, WindowEvent::Moved(_)) && window.label() == "mcp" {
+                if let Some(mcp) = window.app_handle().get_webview_window("mcp") {
+                    schedule_mcp_window_settle(&mcp);
                 }
                 return;
             }
@@ -4645,6 +5616,8 @@ fn main() {
                     api.prevent_close();
                     if window.label() == "status" {
                         hide_status_panel(window.app_handle());
+                    } else if window.label() == "mcp" {
+                        hide_mcp_window(window.app_handle());
                     } else {
                         hide_main_window(window.app_handle());
                     }
@@ -4668,6 +5641,145 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_request_and_response_share_one_activity_and_capture_real_tool_schema() {
+        let mut store = McpActivityStore::default();
+        let request_context = mcp_proxy::ObservationContext::default();
+        let response_context = mcp_proxy::ObservationContext {
+            session_id: Some("logic-session".to_string()),
+        };
+        let pending = store
+            .record_request(
+                &request_context,
+                br#"{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}"#,
+                10,
+            )
+            .unwrap();
+        let update = store.record_response(
+            &response_context,
+            br#"{"jsonrpc":"2.0","id":7,"result":{"tools":[{"name":"capture_info","description":"Read capture","inputSchema":{"type":"object","properties":{"verbose":{"type":"boolean"}}},"annotations":{"readOnlyHint":true}}]}}"#,
+            20,
+        );
+
+        let completed = update.activity.unwrap();
+        assert_eq!(completed.sequence, pending.sequence);
+        assert_eq!(completed.state, "completed");
+        assert_eq!(completed.session_id.as_deref(), Some("logic-session"));
+        assert_eq!(store.activities.len(), 1);
+        assert!(store.pending.is_empty());
+        let tools = update.tools.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "capture_info");
+        assert_eq!(tools[0].input_schema["type"], "object");
+        assert_eq!(tools[0].raw["annotations"]["readOnlyHint"], true);
+    }
+
+    #[test]
+    fn mcp_tool_policy_gates_data_lifecycle_and_unknown_tools_only() {
+        for tool in [
+            "get_devices",
+            "export_raw_data_csv",
+            "add_analyzer",
+            "remove_high_level_analyzer",
+        ] {
+            assert!(
+                matches!(mcp_tool_policy(tool), McpToolPolicy::Allow),
+                "{tool}"
+            );
+        }
+        for tool in [
+            "start_capture",
+            "load_capture",
+            "stop_capture",
+            "close_capture",
+            "future_logic_tool",
+        ] {
+            assert!(
+                matches!(mcp_tool_policy(tool), McpToolPolicy::Review(_)),
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_approval_can_allow_a_tool_for_only_its_current_session() {
+        let mut approvals = McpApprovalStore::default();
+        let context = mcp_proxy::ObservationContext {
+            session_id: Some("session-a".to_string()),
+        };
+        let call = mcp_proxy::ToolCall {
+            id: serde_json::json!(4),
+            tool: "start_capture".to_string(),
+            arguments: serde_json::json!({"duration": 1}),
+        };
+        let (request, mut receiver) = approvals.create(&context, &call, "risk".to_string(), 100);
+        assert_eq!(request.expires_at_ms, 30_100);
+        approvals.resolve(request.approval_id, true, true).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), mcp_proxy::Verdict::Allow);
+        assert!(approvals.is_session_allowed(&context, "start_capture"));
+        assert!(!approvals.is_session_allowed(
+            &mcp_proxy::ObservationContext {
+                session_id: Some("session-b".to_string())
+            },
+            "start_capture"
+        ));
+        approvals.close_session("session-a");
+        assert!(!approvals.is_session_allowed(&context, "start_capture"));
+    }
+
+    #[test]
+    fn mcp_errors_and_session_close_update_the_original_pending_activity() {
+        let mut store = McpActivityStore::default();
+        let context = mcp_proxy::ObservationContext {
+            session_id: Some("session-a".to_string()),
+        };
+        let failed = store
+            .record_request(
+                &context,
+                br#"{"jsonrpc":"2.0","id":"failed","method":"tools/call","params":{"name":"read","arguments":{"channel":1}}}"#,
+                1,
+            )
+            .unwrap();
+        let update = store.record_response(
+            &context,
+            br#"{"jsonrpc":"2.0","id":"failed","error":{"code":-1,"message":"no"}}"#,
+            2,
+        );
+        assert_eq!(update.activity.unwrap().sequence, failed.sequence);
+        assert_eq!(store.activities.back().unwrap().state, "error");
+
+        let pending = store
+            .record_request(
+                &context,
+                br#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"read"}}"#,
+                3,
+            )
+            .unwrap();
+        let closed = store.close_session("session-a", 4);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].sequence, pending.sequence);
+        assert_eq!(closed[0].state, "sessionClosed");
+    }
+
+    #[test]
+    fn malformed_observations_are_ignored_and_activity_history_is_bounded() {
+        let mut store = McpActivityStore::default();
+        let context = mcp_proxy::ObservationContext::default();
+        assert!(store.record_request(&context, b"not json", 0).is_none());
+        assert!(store
+            .record_response(&context, b"not json", 0)
+            .activity
+            .is_none());
+        for index in 0..(MAX_MCP_ACTIVITIES + 5) {
+            let body = format!(
+                r#"{{"jsonrpc":"2.0","method":"notifications/progress","params":{{"progress":{index}}}}}"#
+            );
+            store.record_request(&context, body.as_bytes(), index as u64);
+        }
+        assert_eq!(store.activities.len(), MAX_MCP_ACTIVITIES);
+        assert_eq!(store.activities.front().unwrap().sequence, 6);
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -5380,6 +6492,7 @@ mod tests {
             pxlogic_firmware_id: String::new(),
             guidance: GuidanceSettings::default(),
             status_panel: StatusPanelSettings::default(),
+            mcp: McpSettings::default(),
             pending_profile_fingerprint: None,
         }
         .normalized();

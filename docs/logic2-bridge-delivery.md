@@ -66,3 +66,19 @@ Every implementation task reports the following facts in its final handoff:
 
 Statements such as "tests passed" without the exact command and commit are not
 accepted as delivery evidence.
+
+## Logic 2 MCP evidence
+
+For the MCP proxy feature, focused automated evidence must cover the loopback
+bind/fallback, local Origin enforcement, POST/GET/DELETE and SSE forwarding,
+MCP transport headers, activity pairing, real `tools/list` schema retention,
+and approval allow/deny/session cleanup. The renderer delivery test also keeps
+the independent hidden always-on-top window, main-window entry, generic MCP URL,
+and approval controls from disappearing silently.
+
+These checks use a stand-in upstream and are intentionally hardware-free. The
+handoff must separately state whether an installed Logic 2 MCP server, PXLogic,
+and a supported real Saleae device were exercised. An unperformed manual pass
+is an explicit validation boundary, not a failed automated gate. The operating
+and manual validation procedure is in
+[Logic 2 MCP proxy and activity window](logic2-mcp-proxy.md).

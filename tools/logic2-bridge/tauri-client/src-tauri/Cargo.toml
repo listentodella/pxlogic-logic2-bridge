@@ -8,6 +8,15 @@ build = "build.rs"
 [workspace]
 
 [dependencies]
+# Reuses Tauri's existing HTTP stack at exact locked versions. Enabling hyper's server
+# feature adds its small `httpdate` dependency; raw hyper still avoids pulling in a web
+# framework or a second client stack such as axum/reqwest.
+bytes = "=1.12.1"
+futures-util = "=0.3.33"
+http = "=1.5.0"
+http-body-util = "=0.1.4"
+hyper = { version = "=1.11.0", features = ["client", "http1", "server"] }
+hyper-util = { version = "=0.1.20", features = ["client-legacy", "http1", "tokio"] }
 libc = "0.2"
 plist = "1"
 serde = { version = "1", features = ["derive"] }
@@ -15,6 +24,7 @@ serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
+tokio = { version = "=1.53.1", features = ["net", "rt", "sync", "time"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

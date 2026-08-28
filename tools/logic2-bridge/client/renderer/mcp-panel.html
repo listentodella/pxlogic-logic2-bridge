@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
+    <title>Logic 2 MCP 活动</title>
+    <link rel="stylesheet" href="mcp-panel.css">
+  </head>
+  <body>
+    <header id="drag-handle" class="panel-header">
+      <div class="title-block">
+        <div class="title-line"><span id="proxy-dot" class="state-dot"></span><strong>Logic 2 MCP</strong></div>
+        <span id="proxy-summary">正在读取代理状态…</span>
+      </div>
+      <button id="refresh-button" class="icon-button" type="button" title="刷新" aria-label="刷新">↻</button>
+      <button id="hide-button" class="icon-button" type="button" title="隐藏" aria-label="隐藏">×</button>
+    </header>
+
+    <main>
+      <section class="connection-card" aria-live="polite">
+        <div class="connection-row"><span>代理</span><code id="proxy-endpoint">等待绑定</code></div>
+        <div class="connection-row"><span>Logic 2</span><strong id="upstream-status">正在检测</strong></div>
+        <p id="fallback-warning" class="warning" hidden></p>
+        <p id="upstream-help" class="help" hidden>请启动 Logic 2，并在 Settings &gt; Automation 中启用 MCP Server。</p>
+        <div class="registration-row">
+          <code id="registration-value">http://127.0.0.1:10531/</code>
+          <button id="copy-button" type="button">复制 URL</button>
+        </div>
+        <p class="help">将此 URL 作为 MCP 客户端的 Streamable HTTP 地址；本窗口不绑定任何特定 agent。</p>
+        <label class="auto-show"><input id="auto-show" type="checkbox"> 首次发现 agent 活动时自动显示</label>
+      </section>
+
+      <section id="approval-section" class="approval-section" hidden>
+        <div class="section-heading"><h2>等待确认</h2><span id="approval-count"></span></div>
+        <div id="approval-list"></div>
+      </section>
+
+      <section class="tools-section">
+        <div class="section-heading"><h2>Logic 2 工具</h2><span id="tool-count">尚未读取</span></div>
+        <div id="tool-list" class="tool-list"><p class="empty">agent 请求 tools/list 后显示真实工具清单。</p></div>
+      </section>
+
+      <section class="activity-section">
+        <div class="section-heading"><h2>活动</h2><span id="activity-count">0 条</span></div>
+        <div id="activity-list" class="activity-list" aria-live="polite"><p class="empty">尚无 MCP 活动。</p></div>
+      </section>
+    </main>
+    <script src="mcp-panel.js"></script>
+  </body>
+</html>

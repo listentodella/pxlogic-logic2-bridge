@@ -35,6 +35,23 @@
         "acceptFirstMouse": true,
         "visible": false,
         "focus": false
+      },
+      {
+        "label": "mcp",
+        "title": "Logic 2 MCP 活动",
+        "url": "mcp-panel.html",
+        "width": 440,
+        "height": 620,
+        "minWidth": 360,
+        "minHeight": 360,
+        "center": false,
+        "resizable": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "acceptFirstMouse": true,
+        "visible": false,
+        "focus": false
       }
     ],
     "security": {

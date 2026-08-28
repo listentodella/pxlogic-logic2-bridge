@@ -33,6 +33,21 @@ an experimental candidate or unsupported. See the
 automatic analysis cannot produce a unique candidate or before promoting a
 candidate to verified support.
 
+## Logic 2 MCP activity and approval
+
+The Tauri launcher also runs a loopback-only Streamable HTTP proxy in front of
+Logic 2's MCP server. It is independent of Bridge capture sessions, so its
+always-on-top activity window works with either PXLogic or supported real Saleae
+hardware. The proxy defaults to `127.0.0.1:10531` and forwards to Logic 2 on
+`127.0.0.1:10530`; the window reports a fallback port if the preferred one is
+occupied.
+
+The window observes the real tool catalogue and request/response activity. Known
+read/configuration calls proceed automatically; capture lifecycle and unknown
+tools wait for approval and are refused after 30 seconds. The launcher does not
+implement an agent or bind the feature to a specific MCP client. See [Logic 2 MCP
+proxy and activity window](docs/logic2-mcp-proxy.md).
+
 ## Development checks
 
 Every Bridge feature must pass the same delivery gate locally and on the
