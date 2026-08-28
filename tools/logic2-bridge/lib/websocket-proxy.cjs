@@ -66,7 +66,13 @@ function encodeMaskedTextFrame(text) {
 /// stalls every message queued behind it.
 const OBSERVER_TIMEOUT_MS = 5000;
 
-function withTimeout(promise, milliseconds) {
+/// An unref'd timer is right in the session: a pending deadline must not be the
+/// reason the process lingers at shutdown. It is wrong when the observer it
+/// guards never settles and nothing else keeps the loop alive -- Node runs out
+/// of work, tears down, and the deadline that was supposed to fire never does.
+/// Then the timeout cannot rescue the wait it exists for. Holding the loop open
+/// is what a test of that path needs, so let the caller ask for it.
+function withTimeout(promise, milliseconds, { keepProcessAlive = false } = {}) {
   let timer;
   return Promise.race([
     promise,
@@ -75,7 +81,9 @@ function withTimeout(promise, milliseconds) {
         () => reject(new Error(`observer did not settle within ${milliseconds} ms`)),
         milliseconds,
       );
-      timer.unref?.();
+      if (!keepProcessAlive) {
+        timer.unref?.();
+      }
     }),
   ]).finally(() => clearTimeout(timer));
 }
@@ -86,11 +94,13 @@ class ClientFrameRelay {
     observeText,
     log = message => console.error(message),
     observerTimeoutMs = OBSERVER_TIMEOUT_MS,
+    { keepObserverDeadlineAlive = false } = {},
   ) {
     this.upstream = upstream;
     this.observeText = observeText;
     this.log = log;
     this.observerTimeoutMs = observerTimeoutMs;
+    this.keepObserverDeadlineAlive = keepObserverDeadlineAlive;
     this.buffer = Buffer.alloc(0);
     this.forwarding = Promise.resolve();
     this.fragmentText = null;
@@ -169,6 +179,7 @@ class ClientFrameRelay {
             const transformed = await withTimeout(
               this.observeText(textMessage.text),
               this.observerTimeoutMs,
+              { keepProcessAlive: this.keepObserverDeadlineAlive },
             );
             if (typeof transformed === 'string' && transformed !== textMessage.text) {
               forwardedFrames = [encodeMaskedTextFrame(transformed)];
