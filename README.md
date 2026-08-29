@@ -48,6 +48,13 @@ tools wait for approval and are refused after 30 seconds. The launcher does not
 implement an agent or bind the feature to a specific MCP client. See [Logic 2 MCP
 proxy and activity window](docs/logic2-mcp-proxy.md).
 
+The proxy also adds four timing-marker tools Logic 2's MCP does not offer, so an
+agent can record where it found something instead of only reading. They appear in
+`tools/list` beside Logic 2's own fifteen. Markers are reached through the
+renderer of a Logic 2 the Bridge launched, which means they need a Bridge session
+and an open capture; no DevTools window is ever shown. The details, and what a
+Logic 2 upgrade could break, are in the same document.
+
 ## Development checks
 
 Every Bridge feature must pass the same delivery gate locally and on the

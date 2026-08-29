@@ -334,7 +334,7 @@ test('the status panel draws its own chrome and packs the readout tightly', () =
   // changed by restarting it. Only the framing lives in the entry point.
   assert.match(backend, /control: Option<ChildStdin>,/);
   assert.match(backend, /let control = child\.stdin\.take\(\);/);
-  assert.match(index, /function startControlChannel\(controller\)/);
+  assert.match(index, /function startControlChannel\(controller, markerService\)/);
   assert.match(index, /applyBridgeControlCommand\(controller, line\)/);
   assert.match(backend, /"采集进行中，请先在 Logic 2 里停止采集"/);
   // A rejected edit must not leave the field claiming a threshold that is not in force.
@@ -757,4 +757,87 @@ test('Logic 2 MCP proxy keeps its independent window and safety gate', () => {
   const trayEnd = backend.indexOf('\nfn main()', trayStart);
   const tray = backend.slice(trayStart, trayEnd);
   assert.ok(!tray.includes('MCP'), 'the existing tray menu must not gain an MCP entry');
+});
+
+test('timing markers reach the renderer without exposing a debugging surface', () => {
+  const bridgeRoot = path.resolve(__dirname, '..');
+  const tauriRoot = path.join(bridgeRoot, 'tauri-client/src-tauri');
+  const backend = fs.readFileSync(path.join(tauriRoot, 'src/main.rs'), 'utf8');
+  const proxy = fs.readFileSync(path.join(tauriRoot, 'src/mcp_proxy.rs'), 'utf8');
+  const index = fs.readFileSync(path.join(bridgeRoot, 'index.cjs'), 'utf8');
+  const rendererBridge = fs.readFileSync(path.join(bridgeRoot, 'lib/renderer-bridge.cjs'), 'utf8');
+  const markers = fs.readFileSync(path.join(bridgeRoot, 'lib/renderer-markers.cjs'), 'utf8');
+
+  // The debugging port is a transport for the marker tools. Nothing may turn it into a
+  // visible inspector: the DevTools window is a development affordance and the user
+  // asked for it to stay out of sight.
+  // Matched in argument position rather than anywhere in the file: the comment above
+  // the port allocation names these flags precisely to record that they are not passed,
+  // and an assertion that forbids naming them would delete its own explanation.
+  const passesFlag = (source, flag) =>
+    new RegExp(String.raw`(?:arg|push|args)\s*(?:\(|\[)[^)\]]*${flag}`).test(source);
+  for (const source of [backend, index]) {
+    assert.ok(
+      !passesFlag(source, 'auto-open-devtools'),
+      'the DevTools window must never be opened for the user',
+    );
+    assert.ok(
+      !passesFlag(source, 'enable-automation'),
+      'the automation banner belongs to a flag this must not pass',
+    );
+  }
+  // Again in call position: `Page.inspect` is the one CDP method that raises Logic 2's
+  // own inspector, and it is named in a comment for the same reason.
+  assert.ok(
+    !/send\(\s*'Page\.inspect'|send\(\s*"Page\.inspect"/.test(rendererBridge),
+    'Page.inspect would raise Logic 2 own inspector',
+  );
+  // No CDP domain is enabled, so being connected costs the renderer nothing else.
+  assert.ok(
+    !/Runtime\.enable|Page\.enable|DOM\.enable/.test(rendererBridge),
+    'no CDP domain should be enabled',
+  );
+
+  // The port comes from the OS and only ever binds loopback.
+  assert.match(backend, /fn allocate_renderer_debug_port\(\)/);
+  assert.match(backend, /TcpListener::bind\(\(Ipv4Addr::LOCALHOST, 0\)\)/);
+  assert.match(backend, /"--remote-debugging-port", &debug_port\.to_string\(\)/);
+
+  // Markers are served by this client, added to whatever Logic 2 advertises, and an
+  // official tool of the same name always wins.
+  assert.match(proxy, /fn merge_local_tools\(/);
+  assert.match(proxy, /if existing\.contains\(name\) \{\s*continue;/);
+  assert.match(proxy, /fn call_local_tool<'a>\(/);
+  for (const tool of [
+    'add_timing_marker',
+    'list_timing_markers',
+    'set_timing_marker_note',
+    'remove_timing_marker',
+  ]) {
+    assert.ok(backend.includes(`"${tool}"`), `${tool} must be defined and classified`);
+  }
+
+  // Annotating a capture cannot lose sample data, so these are not gated -- but they
+  // must be named, or the unknown branch would ask about every note.
+  const policyStart = backend.indexOf('fn mcp_tool_policy');
+  const policyEnd = backend.indexOf('\n}', policyStart);
+  const policy = backend.slice(policyStart, policyEnd);
+  assert.match(policy, /"add_timing_marker"/);
+  assert.match(policy, /"remove_timing_marker" => McpToolPolicy::Allow/);
+
+  // The marker request rides the channel that already exists, and every request is
+  // answered: a caller must never be left waiting on a session that has gone.
+  assert.match(backend, /fn call_renderer\(/);
+  assert.match(backend, /fn abandon_renderer_requests\(/);
+  assert.match(backend, /const RENDERER_REQUEST_TIMEOUT: Duration/);
+  assert.match(index, /isMarkerCommand\(parsed\.type\)/);
+
+  // A store path Logic 2 never published: a version that moves it has to say so rather
+  // than look like an empty capture.
+  assert.match(markers, /activeSessionOptional \?\? store\.activeSession/);
+  assert.match(markers, /may have moved it/);
+  assert.match(markers, /no active capture session/);
+  // Notes are data. They are escaped into the expression, never concatenated raw.
+  assert.match(markers, /function quote\(value\)/);
+  assert.match(markers, /JSON\.stringify\(String\(value\)\)/);
 });

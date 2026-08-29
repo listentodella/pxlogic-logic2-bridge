@@ -15,6 +15,7 @@
 //! untouched; only `tools/call` is inspected.
 
 use std::{
+    collections::HashSet,
     convert::Infallible,
     future::Future,
     net::{Ipv4Addr, SocketAddr},
@@ -106,6 +107,23 @@ pub trait ProxyObserver: Send + Sync + 'static {
         _call: &'a ToolCall,
     ) -> Pin<Box<dyn Future<Output = Verdict> + Send + 'a>> {
         Box::pin(async { Verdict::Allow })
+    }
+    /// Tools this host serves itself, added to whatever Logic 2 advertises.
+    ///
+    /// Logic 2's own tools are defined inside its renderer against `rapidDataStore`, so
+    /// what that store holds without a tool in front of it -- timing markers among it --
+    /// is unreachable through the protocol. Adding them here keeps one endpoint and one
+    /// tool list for the agent, which cannot tell the two apart and does not need to.
+    fn local_tools(&self) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
+    /// Answers a call to one of `local_tools`. `None` means it is not ours and must be
+    /// forwarded, so an unrecognised name can never be silently swallowed.
+    fn call_local_tool<'a>(
+        &'a self,
+        _call: &'a ToolCall,
+    ) -> Pin<Box<dyn Future<Output = Option<serde_json::Value>> + Send + 'a>> {
+        Box::pin(async { None })
     }
 }
 
@@ -217,8 +235,26 @@ async fn handle(request: Request<Incoming>, runtime: Arc<ProxyRuntime>) -> Respo
                 }
                 return json_rpc_error(StatusCode::OK, &call.id, &reason);
             }
+            // A tool this host serves is answered here and never reaches Logic 2. The
+            // gate above ran first, so a local tool is reviewed on the same terms as a
+            // forwarded one.
+            if let Some(result) = runtime.observer.call_local_tool(&call).await {
+                let payload = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": call.id,
+                    "result": result,
+                });
+                if let Ok(encoded) = serde_json::to_vec(&payload) {
+                    runtime.observer.observe_response(&context, &encoded);
+                    return json_response(StatusCode::OK, encoded);
+                }
+            }
         }
     }
+
+    // Noted before the request body is handed upstream, because the response arm shadows
+    // `body` with the reply's own.
+    let requested_tool_list = method == Method::POST && is_tools_list_request(&body);
 
     let uri = match upstream_uri(
         &runtime.upstream,
@@ -262,6 +298,59 @@ async fn handle(request: Request<Incoming>, runtime: Arc<ProxyRuntime>) -> Respo
                 runtime.observer.observe_session_closed(&response_context);
             }
             let content_type = parts.headers.get("content-type").cloned();
+            // The one response that is rewritten rather than streamed. It is safe to
+            // collect precisely because it is a tool list: a small JSON reply that the
+            // server has already finished producing. The check is narrow on purpose --
+            // an SSE tool list would be left alone rather than buffered, since holding a
+            // stream open to edit it is what must never happen here.
+            let local_tools = runtime.observer.local_tools();
+            let rewrite_tool_list = requested_tool_list
+                && !local_tools.is_empty()
+                && content_type
+                    .as_ref()
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.starts_with("application/json"));
+            if rewrite_tool_list {
+                let payload = match body.collect().await {
+                    Ok(collected) => {
+                        let upstream_body = collected.to_bytes();
+                        merge_local_tools(&upstream_body, &local_tools)
+                            .unwrap_or_else(|| upstream_body.to_vec())
+                    }
+                    Err(_) => {
+                        return json_rpc_error(
+                            StatusCode::BAD_GATEWAY,
+                            &request_id(&[]),
+                            "无法读取上游工具清单",
+                        )
+                    }
+                };
+                runtime
+                    .observer
+                    .observe_response(&response_context, &payload);
+                let mut forwarded = Response::builder().status(parts.status);
+                for (name, value) in parts.headers.iter() {
+                    // Content-Length is dropped: the merged body has its own length.
+                    if should_forward_header(name, &parts.headers)
+                        && name.as_str() != "content-length"
+                    {
+                        forwarded = forwarded.header(name, value);
+                    }
+                }
+                return forwarded
+                    .body(
+                        Full::new(Bytes::from(payload))
+                            .map_err(|never| match never {})
+                            .boxed(),
+                    )
+                    .unwrap_or_else(|_| {
+                        json_rpc_error(
+                            StatusCode::BAD_GATEWAY,
+                            &request_id(&[]),
+                            "上游响应无法转发",
+                        )
+                    });
+            }
             let mut forwarded = Response::builder().status(parts.status);
             // Response headers pass through wholesale: `Mcp-Session-Id` is assigned here
             // and the client is required to echo it on every later request.
@@ -510,6 +599,19 @@ pub fn request_id(body: &[u8]) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+/// Recognises a `tools/list` request, whose reply is the only one this proxy rewrites.
+pub fn is_tools_list_request(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("method")
+                .and_then(|method| method.as_str())
+                .map(|method| method == "tools/list")
+        })
+        .unwrap_or(false)
+}
+
 /// Recognises a `tools/call` request. Anything else -- including malformed JSON -- is
 /// simply not a tool call, and is forwarded.
 pub fn parse_tool_call(body: &[u8]) -> Option<ToolCall> {
@@ -536,6 +638,57 @@ pub fn json_rpc_error_payload(id: &serde_json::Value, message: &str) -> serde_js
         "id": id,
         "error": { "code": -32000, "message": message },
     })
+}
+
+/// Sends an already-encoded JSON-RPC message as the response body.
+pub fn json_response(status: StatusCode, body: Vec<u8>) -> Response<ProxyBody> {
+    Response::builder()
+        .status(status)
+        .header(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )
+        .body(
+            Full::new(Bytes::from(body))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .expect("a JSON response is always well formed")
+}
+
+/// Adds this host's tools to a `tools/list` result.
+///
+/// The upstream reply is rewritten rather than replaced, so Logic 2 stays the authority
+/// on its own tools and a version that adds one needs no change here. A body that is
+/// not a tool list is returned untouched: guessing at an unexpected shape would be
+/// worse than forwarding it.
+pub fn merge_local_tools(body: &[u8], local: &[serde_json::Value]) -> Option<Vec<u8>> {
+    if local.is_empty() {
+        return None;
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let tools = value.get_mut("result")?.get_mut("tools")?.as_array_mut()?;
+    // A name Logic 2 already serves wins, so a future official tool is never shadowed
+    // by ours.
+    let existing: HashSet<String> = tools
+        .iter()
+        .filter_map(|tool| tool.get("name")?.as_str().map(str::to_owned))
+        .collect();
+    let mut added = false;
+    for tool in local {
+        let Some(name) = tool.get("name").and_then(|name| name.as_str()) else {
+            continue;
+        };
+        if existing.contains(name) {
+            continue;
+        }
+        tools.push(tool.clone());
+        added = true;
+    }
+    if !added {
+        return None;
+    }
+    serde_json::to_vec(&value).ok()
 }
 
 pub fn json_rpc_error(
@@ -769,6 +922,210 @@ mod tests {
 
     fn client() -> Client<HttpConnector, Full<Bytes>> {
         Client::builder(TokioExecutor::new()).build_http()
+    }
+
+    #[test]
+    fn a_tools_list_request_is_recognised_and_others_are_not() {
+        assert!(is_tools_list_request(
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#
+        ));
+        assert!(!is_tools_list_request(
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#
+        ));
+        assert!(!is_tools_list_request(b"not json"));
+        assert!(!is_tools_list_request(b""));
+    }
+
+    #[test]
+    fn local_tools_are_appended_to_the_upstream_catalogue() {
+        let upstream = br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_devices"}]}}"#;
+        let local = vec![serde_json::json!({"name":"add_timing_marker"})];
+        let merged = merge_local_tools(upstream, &local).expect("merged");
+        let value: serde_json::Value = serde_json::from_slice(&merged).unwrap();
+        let names: Vec<&str> = value["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["get_devices", "add_timing_marker"]);
+    }
+
+    #[test]
+    fn an_upstream_tool_of_the_same_name_is_never_shadowed() {
+        // If Logic 2 ever ships its own marker tool, its definition has to win.
+        let upstream =
+            br#"{"result":{"tools":[{"name":"add_timing_marker","description":"official"}]}}"#;
+        let local = vec![serde_json::json!({"name":"add_timing_marker","description":"ours"})];
+        assert!(merge_local_tools(upstream, &local).is_none());
+    }
+
+    #[test]
+    fn a_body_that_is_not_a_tool_list_is_left_alone() {
+        let local = vec![serde_json::json!({"name":"add_timing_marker"})];
+        assert!(merge_local_tools(b"not json", &local).is_none());
+        assert!(merge_local_tools(br#"{"result":{}}"#, &local).is_none());
+        assert!(merge_local_tools(br#"{"error":{"code":-1}}"#, &local).is_none());
+    }
+
+    #[test]
+    fn merging_nothing_leaves_the_catalogue_untouched() {
+        let upstream = br#"{"result":{"tools":[{"name":"get_devices"}]}}"#;
+        assert!(merge_local_tools(upstream, &[]).is_none());
+    }
+
+    #[derive(Default)]
+    struct LocalToolObserver {
+        served: Mutex<Vec<String>>,
+    }
+
+    impl ProxyObserver for LocalToolObserver {
+        fn local_tools(&self) -> Vec<serde_json::Value> {
+            vec![serde_json::json!({
+                "name": "add_timing_marker",
+                "description": "ours",
+                "inputSchema": {"type":"object"},
+            })]
+        }
+        fn call_local_tool<'a>(
+            &'a self,
+            call: &'a ToolCall,
+        ) -> Pin<Box<dyn Future<Output = Option<serde_json::Value>> + Send + 'a>> {
+            Box::pin(async move {
+                if call.tool != "add_timing_marker" {
+                    return None;
+                }
+                self.served.lock().unwrap().push(call.tool.clone());
+                Some(serde_json::json!({
+                    "content": [{"type":"text","text":"{\"id\":4}"}],
+                }))
+            })
+        }
+    }
+
+    /// POSTs one JSON-RPC message through the proxy and returns the raw response body.
+    async fn post_through(port: u16, body: &'static [u8]) -> Vec<u8> {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("http://127.0.0.1:{port}/"))
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from_static(body)))
+            .unwrap();
+        let response = client().request(request).await.unwrap();
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec()
+    }
+
+    #[test]
+    fn the_tool_list_the_agent_sees_includes_both_sources() {
+        runtime().block_on(async {
+            let (port, _recorder) = proxy_in_front_of_observer(
+                |_| {
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(body_of(
+                            br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_devices"}]}}"#,
+                        ))
+                        .unwrap()
+                },
+                Arc::new(LocalToolObserver::default()),
+            )
+            .await;
+            let response =
+                post_through(port, br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await;
+            let value: serde_json::Value = serde_json::from_slice(&response).unwrap();
+            let names: Vec<&str> = value["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, vec!["get_devices", "add_timing_marker"]);
+        });
+    }
+
+    #[test]
+    fn a_local_tool_call_is_answered_without_reaching_logic_2() {
+        runtime().block_on(async {
+            let observer = Arc::new(LocalToolObserver::default());
+            let served = Arc::clone(&observer);
+            let (port, recorder) = proxy_in_front_of_observer(
+                |_| {
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(body_of(br#"{"jsonrpc":"2.0","id":9,"error":{"code":-32601}}"#))
+                        .unwrap()
+                },
+                observer,
+            )
+            .await;
+            let response = post_through(
+                port,
+                br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"add_timing_marker","arguments":{"timeSec":1}}}"#,
+            )
+            .await;
+            let value: serde_json::Value = serde_json::from_slice(&response).unwrap();
+            assert_eq!(value["id"], 7);
+            assert_eq!(value["result"]["content"][0]["type"], "text");
+            assert_eq!(served.served.lock().unwrap().len(), 1);
+            // The upstream never saw it: its recorder is still empty.
+            assert!(recorder.body.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_tool_this_host_does_not_serve_is_still_forwarded() {
+        runtime().block_on(async {
+            let (port, recorder) = proxy_in_front_of_observer(
+                |_| {
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(body_of(br#"{"jsonrpc":"2.0","id":3,"result":{"devices":[]}}"#))
+                        .unwrap()
+                },
+                Arc::new(LocalToolObserver::default()),
+            )
+            .await;
+            let response = post_through(
+                port,
+                br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_devices","arguments":{}}}"#,
+            )
+            .await;
+            let value: serde_json::Value = serde_json::from_slice(&response).unwrap();
+            assert_eq!(value["result"]["devices"].as_array().unwrap().len(), 0);
+            let forwarded = recorder.body.lock().unwrap().clone();
+            assert!(String::from_utf8_lossy(&forwarded).contains("get_devices"));
+        });
+    }
+
+    #[test]
+    fn an_sse_tool_list_is_streamed_rather_than_rewritten() {
+        // Rewriting means collecting, and collecting an SSE stream would hold it open.
+        // Correctness here is that the stream passes through untouched.
+        runtime().block_on(async {
+            let (port, _recorder) = proxy_in_front_of_observer(
+                |_| {
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(body_of(
+                            b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n",
+                        ))
+                        .unwrap()
+                },
+                Arc::new(LocalToolObserver::default()),
+            )
+            .await;
+            let response =
+                post_through(port, br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await;
+            let text = String::from_utf8_lossy(&response);
+            assert!(text.starts_with("data: "));
+            assert!(!text.contains("add_timing_marker"));
+        });
     }
 
     #[derive(Default)]

@@ -9,6 +9,7 @@ use std::{
     fs,
     future::Future,
     io::{BufRead, BufReader, Read, Write},
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     pin::Pin,
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
@@ -454,6 +455,18 @@ struct BridgeRuntimeEvent {
     supported: Option<bool>,
     #[serde(default)]
     reason: Option<String>,
+    /// Correlates a `timing-marker-result` with the request that asked for it. The
+    /// renderer channel is request/response over the same stdin/stderr pair every
+    /// other event uses, so the id is what keeps concurrent marker calls apart.
+    ///
+    /// The rest of a marker result is deliberately not modelled here. It is handed to
+    /// the waiting call as the raw JSON object, because its shape belongs to the tool
+    /// being served rather than to this event type -- a new marker field should not
+    /// need a new field here to survive the trip.
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    ok: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -627,6 +640,18 @@ struct RuntimeState {
     stop_requested: bool,
 }
 
+/// Marker requests waiting for the session to answer them.
+///
+/// The command goes out on the session's stdin and the answer comes back as a
+/// `timing-marker-result` on its stderr, so the two halves meet here rather than in a
+/// call stack. A dropped sender means the session died mid-request, which the waiting
+/// side reports instead of waiting out its timeout.
+#[derive(Default)]
+struct RendererRequests {
+    next_id: u64,
+    pending: BTreeMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>,
+}
+
 struct AppState {
     runtime: Mutex<RuntimeState>,
     bridge_state: Mutex<BridgeState>,
@@ -656,6 +681,7 @@ struct AppState {
     /// What the MCP proxy bound, once it has bound. `None` until then, and while it is
     /// unavailable, which the window has to distinguish from "bound but idle".
     mcp: Mutex<Option<McpRuntimeState>>,
+    renderer_requests: Mutex<RendererRequests>,
     /// A bounded activity feed plus the tools most recently advertised by Logic 2.
     /// This belongs to the app, not a Bridge capture session, for real Saleae users too.
     mcp_activity: Mutex<McpActivityStore>,
@@ -853,6 +879,13 @@ fn mcp_tool_policy(tool: &str) -> McpToolPolicy {
         | "remove_analyzer"
         | "add_high_level_analyzer"
         | "remove_high_level_analyzer" => McpToolPolicy::Allow,
+        // Timing markers are annotations on the capture, not the capture itself. Nothing
+        // here can lose sample data, and being asked to confirm every note an agent
+        // writes down would make the feature not worth having.
+        "add_timing_marker"
+        | "list_timing_markers"
+        | "set_timing_marker_note"
+        | "remove_timing_marker" => McpToolPolicy::Allow,
         "start_capture" => {
             McpToolPolicy::Review("启动新采集可能替换或改变当前采集状态".to_string())
         }
@@ -1186,6 +1219,7 @@ impl Default for AppState {
             panel_drag: Mutex::new(None),
             panel_dock: AtomicU8::new(0),
             mcp: Mutex::new(None),
+            renderer_requests: Mutex::new(RendererRequests::default()),
             mcp_activity: Mutex::new(McpActivityStore::default()),
             mcp_approvals: Mutex::new(McpApprovalStore::default()),
             mcp_auto_shown: AtomicBool::new(false),
@@ -2812,6 +2846,88 @@ fn parse_bridge_runtime_event(line: &str) -> Option<BridgeRuntimeEvent> {
     serde_json::from_str(line.strip_prefix(PREFIX)?).ok()
 }
 
+/// A renderer call that outlives no session: if the Bridge stops, the wait ends.
+const RENDERER_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Hands a marker result to whoever asked for it.
+///
+/// Unknown ids are dropped rather than logged as faults: a request that already timed
+/// out has no receiver left, and the late answer is not news.
+fn resolve_renderer_request(app: &AppHandle, request_id: &str, payload: serde_json::Value) {
+    let sender = app
+        .state::<AppState>()
+        .renderer_requests
+        .lock()
+        .ok()
+        .and_then(|mut requests| requests.pending.remove(request_id));
+    if let Some(sender) = sender {
+        let _ = sender.send(payload);
+    }
+}
+
+/// Fails every waiting marker request, used when the session goes away.
+fn abandon_renderer_requests(app: &AppHandle) {
+    if let Ok(mut requests) = app.state::<AppState>().renderer_requests.lock() {
+        requests.pending.clear();
+    }
+}
+
+/// Sends one renderer command and waits for the matching result.
+///
+/// The timeout is the session's, not the agent's: a Bridge that never answers must not
+/// leave a tool call open, because the MCP client behind it has its own patience and a
+/// hung tool looks like a hung Logic 2.
+async fn call_renderer(
+    app: &AppHandle,
+    command_type: &str,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let (request_id, receiver) = {
+        let state = app.state::<AppState>();
+        let mut requests = state
+            .renderer_requests
+            .lock()
+            .map_err(|_| "渲染通道状态不可用".to_string())?;
+        requests.next_id += 1;
+        let request_id = format!("mk{}", requests.next_id);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        requests.pending.insert(request_id.clone(), sender);
+        (request_id, receiver)
+    };
+
+    let mut payload = arguments.clone();
+    payload.insert(
+        "type".to_string(),
+        serde_json::Value::String(command_type.to_string()),
+    );
+    payload.insert(
+        "requestId".to_string(),
+        serde_json::Value::String(request_id.clone()),
+    );
+    let line = serde_json::Value::Object(payload).to_string();
+
+    if let Err(error) = send_bridge_control(app, &line) {
+        if let Ok(mut requests) = app.state::<AppState>().renderer_requests.lock() {
+            requests.pending.remove(&request_id);
+        }
+        return Err(error);
+    }
+
+    match tokio::time::timeout(RENDERER_REQUEST_TIMEOUT, receiver).await {
+        Ok(Ok(payload)) => Ok(payload),
+        Ok(Err(_)) => Err("Bridge 会话已结束，标记请求未完成".to_string()),
+        Err(_) => {
+            if let Ok(mut requests) = app.state::<AppState>().renderer_requests.lock() {
+                requests.pending.remove(&request_id);
+            }
+            Err(format!(
+                "Bridge 未在 {} 秒内回应标记请求",
+                RENDERER_REQUEST_TIMEOUT.as_secs()
+            ))
+        }
+    }
+}
+
 fn capture_failure_message(code: &str) -> &'static str {
     match code {
         "PXLOGIC_RATE_MISMATCH" => "实际采样率与 Logic 2 设置不一致",
@@ -3065,6 +3181,18 @@ fn append_log(app: &AppHandle, source: &str, line: &str) {
     }
     let _ = app.emit("bridge-log", &entry);
     if let Some(event) = parse_bridge_runtime_event(line) {
+        // A marker result is an answer, not a state change: it goes to the request that
+        // is waiting for it and nothing else looks at it.
+        if event.event_type == "timing-marker-result" {
+            if let Some(request_id) = event.request_id.clone() {
+                let payload = serde_json::from_str::<serde_json::Value>(
+                    line.strip_prefix("[logic2-bridge:event] ").unwrap_or("{}"),
+                )
+                .unwrap_or(serde_json::Value::Null);
+                resolve_renderer_request(app, &request_id, payload);
+            }
+            return;
+        }
         let capture_telemetry = app
             .state::<AppState>()
             .capture_telemetry
@@ -3215,6 +3343,9 @@ fn monitor_bridge(app: AppHandle, token: u64) {
         };
         match result {
             Some(result) => {
+                // The renderer channel died with the session, so anything still waiting
+                // on it is answered now rather than at its own timeout.
+                abandon_renderer_requests(&app);
                 let quitting = app.state::<AppState>().quitting.load(Ordering::Acquire)
                     || app
                         .state::<AppState>()
@@ -4769,6 +4900,19 @@ async fn bridge_start(app: AppHandle, settings: ClientSettings) -> Result<Bridge
     result
 }
 
+/// Picks a free loopback port for the renderer channel, or `None` to run without one.
+///
+/// Asking the OS for port 0 and releasing it immediately is a race in principle: the
+/// port could be taken again before Logic 2 binds it. It is the right trade anyway --
+/// a fixed port collides for certain when a second Logic 2 starts, and losing the
+/// channel costs only the marker tools, which report the channel as unavailable.
+fn allocate_renderer_debug_port() -> Option<u16> {
+    std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .ok()
+        .and_then(|listener| listener.local_addr().ok())
+        .map(|address| address.port())
+}
+
 fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<BridgeState, String> {
     // These settings came straight from the renderer, so the backend-owned
     // sections have to be merged back before anything is written.
@@ -4813,6 +4957,12 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
     } else {
         "auto".to_string()
     };
+    // Opens the channel the timing-marker tools need. This is a transport only: no
+    // DevTools window is opened, `--auto-open-devtools-for-tabs` is never passed, and
+    // the proxy never sends `Page.inspect`. Chromium shows nothing for the port being
+    // open, and the automation banner belongs to `--enable-automation`, which is not
+    // used. The port is taken from the OS so two Logic instances cannot collide.
+    let renderer_debug_port = allocate_renderer_debug_port();
     let mut command = Command::new(&executable);
     // Electron's Windows RunAsNode command-line handling can split an
     // absolute `C:\\...` script argument at the drive colon and then ask
@@ -4851,6 +5001,9 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(debug_port) = renderer_debug_port {
+        command.args(["--remote-debugging-port", &debug_port.to_string()]);
+    }
     if settings.maximize_logic_window {
         command.arg("--maximize-window");
     } else {
@@ -5263,6 +5416,126 @@ struct TauriProxyObserver {
     app: AppHandle,
 }
 
+/// The timing-marker tools this client adds to Logic 2's MCP surface.
+///
+/// Logic 2 defines its own fifteen tools inside its renderer, reading `rapidDataStore`
+/// directly. Timing markers live on that same store with no tool in front of them, so
+/// an agent can capture and decode but cannot write down where it found something. That
+/// is the gap these four close.
+///
+/// The descriptions carry the two facts an agent cannot discover by trying: that
+/// `timeSec` is measured from the start of the capture, and that a capture has to exist
+/// before a marker can sit on it.
+fn marker_tool_definitions() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "add_timing_marker",
+            "description": "Add a timing marker to the current Logic 2 capture, optionally with a note. \
+                            Use this to record where something was found -- a protocol error, an unexpected \
+                            edge, the start of a transaction. timeSec is measured in seconds from the start \
+                            of the capture. Requires an active capture in Logic 2.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "timeSec": {
+                        "type": "number",
+                        "description": "Position in seconds from the start of the capture.",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Free text attached to the marker, shown in Logic 2's Timing Markers sidebar.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Short label drawn on the marker itself. Logic 2 picks one when omitted.",
+                    },
+                    "color": {
+                        "type": "string",
+                        "enum": ["blue", "green", "orange", "pink", "purple", "red", "teal", "yellow"],
+                        "description": "Marker colour.",
+                    },
+                },
+                "required": ["timeSec"],
+            },
+        }),
+        serde_json::json!({
+            "name": "list_timing_markers",
+            "description": "List the timing markers on the current Logic 2 capture, in time order, \
+                            with their ids, labels and notes. Requires an active capture in Logic 2.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] },
+        }),
+        serde_json::json!({
+            "name": "set_timing_marker_note",
+            "description": "Set or clear the note on an existing timing marker. Omit note to clear it. \
+                            Use list_timing_markers to find the id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Marker id from list_timing_markers." },
+                    "note": { "type": "string", "description": "New note text; omit to clear." },
+                },
+                "required": ["id"],
+            },
+        }),
+        serde_json::json!({
+            "name": "remove_timing_marker",
+            "description": "Remove one timing marker from the current Logic 2 capture by id. \
+                            Use list_timing_markers to find the id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Marker id from list_timing_markers." },
+                },
+                "required": ["id"],
+            },
+        }),
+    ]
+}
+
+/// Maps a marker tool name onto the session command that serves it.
+fn marker_command_for_tool(tool: &str) -> Option<&'static str> {
+    match tool {
+        "add_timing_marker" => Some("add-timing-marker"),
+        "list_timing_markers" => Some("list-timing-markers"),
+        "set_timing_marker_note" => Some("set-timing-marker-note"),
+        "remove_timing_marker" => Some("remove-timing-marker"),
+        _ => None,
+    }
+}
+
+/// Renders a marker outcome as an MCP tool result.
+///
+/// A failure is reported as `isError` with the reason as text rather than as a JSON-RPC
+/// error, which is what the protocol asks for: the call reached the tool and the tool
+/// has something to say. An agent can then correct itself -- starting a capture first,
+/// for instance -- instead of treating it as a broken endpoint.
+fn marker_tool_result(payload: &serde_json::Value) -> serde_json::Value {
+    let ok = payload
+        .get("ok")
+        .and_then(|ok| ok.as_bool())
+        .unwrap_or(false);
+    if !ok {
+        let reason = payload
+            .get("error")
+            .and_then(|error| error.as_str())
+            .unwrap_or("时间标记操作失败");
+        return serde_json::json!({
+            "content": [{ "type": "text", "text": reason }],
+            "isError": true,
+        });
+    }
+    // The interesting part of a success is the marker data, so it is returned as text
+    // JSON: MCP results are text content, and an agent reads JSON well.
+    let mut reported = payload.clone();
+    if let Some(object) = reported.as_object_mut() {
+        object.remove("ok");
+        object.remove("type");
+        object.remove("requestId");
+    }
+    let text = serde_json::to_string(&reported).unwrap_or_else(|_| "{}".to_string());
+    serde_json::json!({ "content": [{ "type": "text", "text": text }] })
+}
+
 impl mcp_proxy::ProxyObserver for TauriProxyObserver {
     fn observe_request(&self, context: &mcp_proxy::ObservationContext, body: &[u8]) {
         let state = self.app.state::<AppState>();
@@ -5297,6 +5570,39 @@ impl mcp_proxy::ProxyObserver for TauriProxyObserver {
                 let _ = self.app.emit("mcp-tools", tools);
             }
         }
+    }
+
+    fn local_tools(&self) -> Vec<serde_json::Value> {
+        // Advertised whether or not a session is running. A tool that appears only
+        // sometimes teaches an agent nothing; one that is always listed and explains it
+        // needs a capture is answerable.
+        marker_tool_definitions()
+    }
+
+    fn call_local_tool<'a>(
+        &'a self,
+        call: &'a mcp_proxy::ToolCall,
+    ) -> Pin<Box<dyn Future<Output = Option<serde_json::Value>> + Send + 'a>> {
+        let app = self.app.clone();
+        let call = call.clone();
+        Box::pin(async move {
+            let command = marker_command_for_tool(&call.tool)?;
+            let arguments = call
+                .arguments
+                .as_object()
+                .cloned()
+                .unwrap_or_else(serde_json::Map::new);
+            match call_renderer(&app, command, &arguments).await {
+                Ok(payload) => Some(marker_tool_result(&payload)),
+                // A transport failure is still this tool's answer, not a reason to fall
+                // through to Logic 2 -- which has no such tool and would reject it with
+                // a less useful message.
+                Err(error) => Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": error }],
+                    "isError": true,
+                })),
+            }
+        })
     }
 
     fn review<'a>(
@@ -5700,6 +6006,91 @@ mod tests {
                 "{tool}"
             );
         }
+    }
+
+    #[test]
+    fn every_marker_tool_is_classified_rather_than_left_unknown() {
+        // The unknown branch gates by default, which for an annotation would mean a
+        // confirmation dialog per note. Each name has to be recognised on purpose.
+        for tool in marker_tool_definitions() {
+            let name = tool["name"].as_str().unwrap();
+            assert!(
+                matches!(mcp_tool_policy(name), McpToolPolicy::Allow),
+                "{name} fell through to the gate"
+            );
+            assert!(marker_command_for_tool(name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_marker_tools_declare_the_two_facts_an_agent_cannot_guess() {
+        let definitions = marker_tool_definitions();
+        assert_eq!(definitions.len(), 4);
+        let add = definitions
+            .iter()
+            .find(|tool| tool["name"] == "add_timing_marker")
+            .expect("add_timing_marker");
+        let description = add["description"].as_str().unwrap();
+        // Where zero is, and that a capture must already exist.
+        assert!(description.contains("from the start"), "{description}");
+        assert!(description.contains("active capture"), "{description}");
+        assert_eq!(add["inputSchema"]["required"][0], "timeSec");
+        assert!(add["inputSchema"]["properties"]["note"].is_object());
+    }
+
+    #[test]
+    fn a_marker_failure_is_reported_as_a_tool_error_the_agent_can_act_on() {
+        // Not a JSON-RPC error: the call reached the tool, and the tool has something to
+        // say. An agent that hears "start a capture first" can do that.
+        let payload = serde_json::json!({
+            "type": "timing-marker-result",
+            "requestId": "mk1",
+            "ok": false,
+            "error": "Logic 2 has no active capture session; start or load a capture first",
+        });
+        let result = marker_tool_result(&payload);
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("start or load a capture"));
+    }
+
+    #[test]
+    fn a_marker_success_reports_the_marker_without_the_transport_fields() {
+        let payload = serde_json::json!({
+            "type": "timing-marker-result",
+            "requestId": "mk2",
+            "ok": true,
+            "marker": { "id": 4, "timeSec": 1.5, "note": "SPI framing error" },
+        });
+        let result = marker_tool_result(&payload);
+        assert!(result.get("isError").is_none());
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let reported: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(reported["marker"]["id"], 4);
+        assert_eq!(reported["marker"]["note"], "SPI framing error");
+        // The correlation id and envelope are ours, not the agent's business.
+        assert!(reported.get("requestId").is_none());
+        assert!(reported.get("ok").is_none());
+        assert!(reported.get("type").is_none());
+    }
+
+    #[test]
+    fn a_result_without_an_ok_flag_is_treated_as_a_failure() {
+        let result = marker_tool_result(&serde_json::json!({}));
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn a_timing_marker_result_carries_the_request_id_it_answers() {
+        let event = parse_bridge_runtime_event(
+            r#"[logic2-bridge:event] {"type":"timing-marker-result","requestId":"mk7","ok":true,"marker":{"id":2}}"#,
+        )
+        .expect("event");
+        assert_eq!(event.event_type, "timing-marker-result");
+        assert_eq!(event.request_id.as_deref(), Some("mk7"));
+        assert_eq!(event.ok, Some(true));
     }
 
     #[test]

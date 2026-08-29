@@ -23,6 +23,7 @@ const { normalizeEnabledChannels } = require('./lib/logic-format.cjs');
 const { GraphActionGuard } = require('./lib/graph-action-guard.cjs');
 const { GraphLogMonitor } = require('./lib/diagnostics.cjs');
 const { startWebSocketProxy } = require('./lib/websocket-proxy.cjs');
+const { MarkerCommandService, isMarkerCommand } = require('./lib/marker-commands.cjs');
 
 const bridgeRoot = __dirname;
 const pxlogicRoot = path.resolve(bridgeRoot, '..', '..');
@@ -868,7 +869,7 @@ async function waitForExit(child) {
  * Only the framing lives here; what a command means belongs with the controller that
  * owns the setting, and is unit-tested there.
  */
-function startControlChannel(controller) {
+function startControlChannel(controller, markerService) {
   let buffered = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', chunk => {
@@ -878,7 +879,21 @@ function startControlChannel(controller) {
       const line = buffered.slice(0, newline).trim();
       buffered = buffered.slice(newline + 1);
       newline = buffered.indexOf('\n');
-      const outcome = line ? applyBridgeControlCommand(controller, line) : null;
+      if (!line) continue;
+      // Marker commands answer asynchronously over the renderer channel and report
+      // their own result event, so they are routed before the synchronous settings
+      // commands rather than through them.
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        parsed = null;
+      }
+      if (markerService && parsed && isMarkerCommand(parsed.type)) {
+        void markerService.handle(parsed);
+        continue;
+      }
+      const outcome = applyBridgeControlCommand(controller, line);
       if (outcome) console.error(outcome);
     }
   });
@@ -994,6 +1009,7 @@ async function main() {
   });
 
   let controller;
+  let markerService;
   let proxy;
   let logic;
   let stopping = false;
@@ -1024,7 +1040,14 @@ async function main() {
       startupTimeoutMs,
     );
     controller = new PxlogicCaptureController(options, host);
-    startControlChannel(controller);
+    // Timing markers reach Logic 2's renderer, which only listens when the session
+    // launched it with a debugging port. Without one the service still answers, saying
+    // the channel is off, so a marker request never just disappears.
+    markerService = new MarkerCommandService({
+      debuggingPort: options.remoteDebuggingPort,
+      emit: event => console.error(bridgeEventLine(event)),
+    });
+    startControlChannel(controller, markerService);
     const graphActionGuard = new GraphActionGuard();
     proxy = await startWebSocketProxy({
       port: options.port,
@@ -1061,6 +1084,7 @@ async function main() {
     console.log(`[logic2-bridge] Logic exited (${exit.signal || exit.code})`);
     if (!stopping && exit.code) process.exitCode = exit.code;
   } finally {
+    markerService?.close();
     await controller?.shutdown();
     await proxy?.close();
     if (host.exitCode === null) {
