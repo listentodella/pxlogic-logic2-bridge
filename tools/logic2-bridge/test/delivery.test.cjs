@@ -810,12 +810,31 @@ test('timing markers reach the renderer without exposing a debugging surface', (
   assert.match(proxy, /fn call_local_tool<'a>\(/);
   for (const tool of [
     'add_timing_marker',
+    'add_timing_marker_pair',
     'list_timing_markers',
     'set_timing_marker_note',
     'remove_timing_marker',
   ]) {
     assert.ok(backend.includes(`"${tool}"`), `${tool} must be defined and classified`);
   }
+
+  // Shadowing has to hold on both halves. The listing suppresses a local tool whose name
+  // Logic 2 serves; dispatch has to yield on that same name, or the agent reads one
+  // schema and reaches another implementation.
+  assert.match(proxy, /fn upstream_tool_names\(/);
+  assert.match(proxy, /fn observe_upstream_tools\(/);
+  assert.match(backend, /mcp_upstream_tools/);
+  assert.match(backend, /if shadowed_by_upstream \{\s*return None;/);
+
+  // Only colours Logic 2 renders may be advertised: it looks the name up in its own map
+  // and silently drops an unknown one, so a dead enum entry is a promise that is not kept.
+  for (const dead of ['"blue"', '"pink"', '"teal"']) {
+    assert.ok(
+      !backend.includes(dead),
+      `${dead} is not a colour Logic 2 renders and must not be offered`,
+    );
+  }
+  assert.ok(backend.includes('"paleRed"'), 'the palette Logic 2 uses itself must be offered');
 
   // Annotating a capture cannot lose sample data, so these are not gated -- but they
   // must be named, or the unknown branch would ask about every note.
@@ -840,4 +859,22 @@ test('timing markers reach the renderer without exposing a debugging surface', (
   // Notes are data. They are escaped into the expression, never concatenated raw.
   assert.match(markers, /function quote\(value\)/);
   assert.match(markers, /JSON\.stringify\(String\(value\)\)/);
+  // Both line terminators JSON leaves bare are escaped, and as escapes rather than as
+  // literal characters -- a literal one inside a regex ends the regex.
+  assert.match(markers, /\.replace\(\/\\u2028\/g, '\\\\u2028'\)/);
+  assert.match(markers, /\.replace\(\/\\u2029\/g, '\\\\u2029'\)/);
+
+  // Logic 2's own gate on annotations is respected rather than written through: for a
+  // non-MSO device it is `captureFinished`, so the app itself never annotates a running
+  // capture. Only an explicit false refuses, so a build without the property still works.
+  assert.match(markers, /canAddAnnotations === false/);
+  assert.match(markers, /const ANNOTATABLE_SESSION/);
+
+  // Pairs share the marker sidebar and the id sequence, so listing reads both maps and an
+  // id resolves to either. Reading only `markers` reported a capture holding a pair as
+  // empty.
+  assert.match(markers, /store\.pairs \?\? \{\}/);
+  assert.match(markers, /createPairFromMarkers/);
+  assert.match(markers, /no timing marker or pair with id/);
+  assert.match(markers, /durationSec: item\.timesSec\[1\] - item\.timesSec\[0\]/);
 });

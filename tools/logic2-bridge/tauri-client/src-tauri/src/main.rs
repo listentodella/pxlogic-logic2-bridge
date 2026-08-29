@@ -688,6 +688,12 @@ struct AppState {
     mcp_approvals: Mutex<McpApprovalStore>,
     /// Prevent normal activity from repeatedly reopening a window the user hid.
     mcp_auto_shown: AtomicBool,
+    /// Tool names Logic 2 advertised in its own `tools/list`, before ours were merged in.
+    ///
+    /// Kept apart from `mcp_activity`'s catalogue, which holds the merged list the window
+    /// displays and so cannot answer "is this name Logic 2's?". A local tool yields to an
+    /// upstream one of the same name, which is only decidable with this.
+    mcp_upstream_tools: Mutex<HashSet<String>>,
 }
 
 /// The proxy's live state, as the window needs to see it.
@@ -883,6 +889,7 @@ fn mcp_tool_policy(tool: &str) -> McpToolPolicy {
         // here can lose sample data, and being asked to confirm every note an agent
         // writes down would make the feature not worth having.
         "add_timing_marker"
+        | "add_timing_marker_pair"
         | "list_timing_markers"
         | "set_timing_marker_note"
         | "remove_timing_marker" => McpToolPolicy::Allow,
@@ -1223,6 +1230,7 @@ impl Default for AppState {
             mcp_activity: Mutex::new(McpActivityStore::default()),
             mcp_approvals: Mutex::new(McpApprovalStore::default()),
             mcp_auto_shown: AtomicBool::new(false),
+            mcp_upstream_tools: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -5421,19 +5429,40 @@ struct TauriProxyObserver {
 /// Logic 2 defines its own fifteen tools inside its renderer, reading `rapidDataStore`
 /// directly. Timing markers live on that same store with no tool in front of them, so
 /// an agent can capture and decode but cannot write down where it found something. That
-/// is the gap these four close.
+/// is the gap these five close.
 ///
-/// The descriptions carry the two facts an agent cannot discover by trying: that
-/// `timeSec` is measured from the start of the capture, and that a capture has to exist
-/// before a marker can sit on it.
+/// The descriptions carry the facts an agent cannot discover by trying: that `timeSec` is
+/// measured from the start of the capture, that a capture has to exist before a marker
+/// can sit on it, and that Logic 2 only annotates a capture once it has finished.
 fn marker_tool_definitions() -> Vec<serde_json::Value> {
+    // Only names from `DarkColor` render. Logic 2 looks the value up in its colour map and
+    // silently drops an unknown one, so an enum listing a colour that does nothing would
+    // be worse than a shorter one. The first six are the palette Logic 2 cycles through
+    // itself; the plain names are the same map's other entries.
+    let colors = serde_json::json!([
+        "paleRed",
+        "green2",
+        "purple2",
+        "orange2",
+        "fuchsia",
+        "lightBlue",
+        "red",
+        "green",
+        "orange",
+        "purple",
+        "yellow"
+    ]);
+    // Both add tools state this. An agent that reads it on one and not the other will
+    // assume the quieter one is unrestricted.
+    let capture_state_note = "Logic 2 only annotates a capture that has finished (or, on MSO, \
+                              one that is paused), so this fails while a capture is still running.";
     vec![
         serde_json::json!({
             "name": "add_timing_marker",
-            "description": "Add a timing marker to the current Logic 2 capture, optionally with a note. \
+            "description": format!("Add a timing marker to the current Logic 2 capture, optionally with a note. \
                             Use this to record where something was found -- a protocol error, an unexpected \
                             edge, the start of a transaction. timeSec is measured in seconds from the start \
-                            of the capture. Requires an active capture in Logic 2.",
+                            of the capture. Requires an active capture in Logic 2. {capture_state_note}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -5447,11 +5476,11 @@ fn marker_tool_definitions() -> Vec<serde_json::Value> {
                     },
                     "label": {
                         "type": "string",
-                        "description": "Short label drawn on the marker itself. Logic 2 picks one when omitted.",
+                        "description": "Short label drawn on the marker itself. Logic 2 defaults it to the marker's id.",
                     },
                     "color": {
                         "type": "string",
-                        "enum": ["blue", "green", "orange", "pink", "purple", "red", "teal", "yellow"],
+                        "enum": colors,
                         "description": "Marker colour.",
                     },
                 },
@@ -5459,19 +5488,56 @@ fn marker_tool_definitions() -> Vec<serde_json::Value> {
             },
         }),
         serde_json::json!({
+            "name": "add_timing_marker_pair",
+            "description": format!("Add a timing marker pair spanning two times, which is how Logic 2 measures \
+                            an interval: the pair reports its own duration. Use this instead of two separate \
+                            markers when the question is how long something took -- a transaction, a gap \
+                            between edges, a pulse width. Both times are in seconds from the start of the \
+                            capture. Requires an active capture in Logic 2. {capture_state_note}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "startSec": {
+                        "type": "number",
+                        "description": "Interval start, in seconds from the start of the capture.",
+                    },
+                    "endSec": {
+                        "type": "number",
+                        "description": "Interval end, in seconds from the start of the capture. Must differ from startSec.",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Free text attached to the pair, shown in Logic 2's Timing Markers sidebar.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Short label drawn on the pair. Logic 2 defaults it to the pair's id.",
+                    },
+                    "color": {
+                        "type": "string",
+                        "enum": colors,
+                        "description": "Pair colour.",
+                    },
+                },
+                "required": ["startSec", "endSec"],
+            },
+        }),
+        serde_json::json!({
             "name": "list_timing_markers",
-            "description": "List the timing markers on the current Logic 2 capture, in time order, \
-                            with their ids, labels and notes. Requires an active capture in Logic 2.",
+            "description": "List what is annotating the current Logic 2 capture: single markers under \
+                            \"markers\", each with its timeSec, and interval pairs under \"pairs\", each with \
+                            startSec, endSec and durationSec. Both carry ids, labels and notes, and share one \
+                            id sequence. Requires an active capture in Logic 2.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] },
         }),
         serde_json::json!({
             "name": "set_timing_marker_note",
-            "description": "Set or clear the note on an existing timing marker. Omit note to clear it. \
+            "description": "Set or clear the note on an existing timing marker or pair. Omit note to clear it. \
                             Use list_timing_markers to find the id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "id": { "type": "integer", "description": "Marker id from list_timing_markers." },
+                    "id": { "type": "integer", "description": "Marker or pair id from list_timing_markers." },
                     "note": { "type": "string", "description": "New note text; omit to clear." },
                 },
                 "required": ["id"],
@@ -5479,12 +5545,12 @@ fn marker_tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "remove_timing_marker",
-            "description": "Remove one timing marker from the current Logic 2 capture by id. \
+            "description": "Remove one timing marker or pair from the current Logic 2 capture by id. \
                             Use list_timing_markers to find the id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "id": { "type": "integer", "description": "Marker id from list_timing_markers." },
+                    "id": { "type": "integer", "description": "Marker or pair id from list_timing_markers." },
                 },
                 "required": ["id"],
             },
@@ -5496,6 +5562,7 @@ fn marker_tool_definitions() -> Vec<serde_json::Value> {
 fn marker_command_for_tool(tool: &str) -> Option<&'static str> {
     match tool {
         "add_timing_marker" => Some("add-timing-marker"),
+        "add_timing_marker_pair" => Some("add-timing-marker-pair"),
         "list_timing_markers" => Some("list-timing-markers"),
         "set_timing_marker_note" => Some("set-timing-marker-note"),
         "remove_timing_marker" => Some("remove-timing-marker"),
@@ -5579,6 +5646,13 @@ impl mcp_proxy::ProxyObserver for TauriProxyObserver {
         marker_tool_definitions()
     }
 
+    fn observe_upstream_tools(&self, names: &[String]) {
+        // Replaced rather than extended, so a tool Logic 2 has dropped stops shadowing.
+        if let Ok(mut upstream) = self.app.state::<AppState>().mcp_upstream_tools.lock() {
+            *upstream = names.iter().cloned().collect();
+        }
+    }
+
     fn call_local_tool<'a>(
         &'a self,
         call: &'a mcp_proxy::ToolCall,
@@ -5587,6 +5661,18 @@ impl mcp_proxy::ProxyObserver for TauriProxyObserver {
         let call = call.clone();
         Box::pin(async move {
             let command = marker_command_for_tool(&call.tool)?;
+            // Logic 2 wins a name collision. The merged tool list already suppresses ours
+            // in that case, so answering it here anyway would hand the agent an
+            // implementation whose schema it was never shown.
+            let shadowed_by_upstream = app
+                .state::<AppState>()
+                .mcp_upstream_tools
+                .lock()
+                .map(|names| names.contains(&call.tool))
+                .unwrap_or(false);
+            if shadowed_by_upstream {
+                return None;
+            }
             let arguments = call
                 .arguments
                 .as_object()
@@ -6023,9 +6109,9 @@ mod tests {
     }
 
     #[test]
-    fn the_marker_tools_declare_the_two_facts_an_agent_cannot_guess() {
+    fn the_marker_tools_declare_the_facts_an_agent_cannot_guess() {
         let definitions = marker_tool_definitions();
-        assert_eq!(definitions.len(), 4);
+        assert_eq!(definitions.len(), 5);
         let add = definitions
             .iter()
             .find(|tool| tool["name"] == "add_timing_marker")
@@ -6036,6 +6122,83 @@ mod tests {
         assert!(description.contains("active capture"), "{description}");
         assert_eq!(add["inputSchema"]["required"][0], "timeSec");
         assert!(add["inputSchema"]["properties"]["note"].is_object());
+
+        // Both writing tools have to say that Logic 2 refuses to annotate a running
+        // capture. An agent that reads it on one and not the other concludes the quieter
+        // one is unrestricted and retries against it.
+        for name in ["add_timing_marker", "add_timing_marker_pair"] {
+            let tool = definitions
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect(name);
+            let description = tool["description"].as_str().unwrap();
+            assert!(description.contains("finished"), "{name}: {description}");
+        }
+
+        // A pair is an interval, so both ends are required and the reply is about duration.
+        let pair = definitions
+            .iter()
+            .find(|tool| tool["name"] == "add_timing_marker_pair")
+            .expect("add_timing_marker_pair");
+        let required: Vec<&str> = pair["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(required, vec!["startSec", "endSec"]);
+        assert!(pair["description"].as_str().unwrap().contains("duration"));
+
+        // Listing has to name both shapes, or an agent reads a capture holding only pairs
+        // as an empty one.
+        let list = definitions
+            .iter()
+            .find(|tool| tool["name"] == "list_timing_markers")
+            .expect("list_timing_markers");
+        let description = list["description"].as_str().unwrap();
+        assert!(description.contains("markers"), "{description}");
+        assert!(description.contains("pairs"), "{description}");
+        assert!(description.contains("durationSec"), "{description}");
+    }
+
+    #[test]
+    fn every_advertised_marker_colour_is_one_logic_2_can_actually_render() {
+        // `MarkerManager.color` is a key into Logic 2's colour map and the sidebar renders
+        // `darkColors[color]`. An unknown name resolves to undefined and the colour is
+        // silently dropped, so advertising one is advertising a no-op. These names were
+        // taken from that map in Logic 2 2.4.46's own sources; the first six are the
+        // palette it cycles through for new markers.
+        let renderable = [
+            "paleRed",
+            "green2",
+            "purple2",
+            "orange2",
+            "fuchsia",
+            "lightBlue",
+            "red",
+            "green",
+            "orange",
+            "purple",
+            "yellow",
+        ];
+        let mut checked = 0;
+        for tool in marker_tool_definitions() {
+            let Some(color) = tool["inputSchema"]["properties"].get("color") else {
+                continue;
+            };
+            let advertised = color["enum"].as_array().expect("colour enum");
+            assert!(!advertised.is_empty());
+            for value in advertised {
+                let name = value.as_str().unwrap();
+                assert!(
+                    renderable.contains(&name),
+                    "{name} is not a colour Logic 2 renders"
+                );
+            }
+            checked += 1;
+        }
+        // Both writing tools take a colour; a silent zero here would pass vacuously.
+        assert_eq!(checked, 2);
     }
 
     #[test]

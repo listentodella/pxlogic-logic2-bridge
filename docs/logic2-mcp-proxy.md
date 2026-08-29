@@ -97,25 +97,57 @@ be extended from outside -- it is whichever calls Saleae chose to wrap. Timing
 markers sit on that same store with no tool in front of them.
 
 That leaves an agent able to capture and decode but unable to record where it
-found something. These four tools close the gap:
+found something. These five tools close the gap:
 
 | Tool | What it does |
 |------|--------------|
 | `add_timing_marker` | Adds a marker at `timeSec`, optionally with `note`, `label`, `color` |
-| `list_timing_markers` | Lists markers in time order with ids, labels, notes |
-| `set_timing_marker_note` | Sets or clears the note on one marker |
-| `remove_timing_marker` | Removes one marker by id |
+| `add_timing_marker_pair` | Adds a pair spanning `startSec`..`endSec`, which is how Logic 2 measures an interval |
+| `list_timing_markers` | Lists markers and pairs in time order with ids, labels, notes, durations |
+| `set_timing_marker_note` | Sets or clears the note on one marker or pair |
+| `remove_timing_marker` | Removes one marker or pair by id |
 
 They appear in `tools/list` alongside Logic 2's own, and an agent cannot tell the
 two apart. The proxy rewrites only that one response, and only when it is JSON --
 an SSE tool list is streamed untouched, because collecting a stream to edit it is
 exactly what this proxy must never do. A name Logic 2 already serves always wins,
-so a future official marker tool would shadow ours rather than the reverse.
+so a future official marker tool would shadow ours rather than the reverse: the
+listing suppresses ours, and dispatch yields on that same name. Both halves are
+needed, and only the first was there at first -- an agent would have read Logic 2's
+schema and reached this implementation, which is the worst of the three outcomes.
+Upstream's own names are taken from the reply before the merge, because afterwards
+the two are indistinguishable.
 
-`timeSec` counts from the start of the capture, and a capture has to exist first.
-Both facts are stated in the tool descriptions, since neither is discoverable by
-trying: without them an agent guesses at wall-clock time and reads an empty
-result as "no markers" rather than "no capture".
+Pairs are reported alongside single markers rather than behind a tool of their own,
+because they share the sidebar and one id sequence -- `getNextId` maxes over both
+maps. An id an agent read from a list is therefore unambiguous, and asking it to
+say which kind it meant would be asking for something it cannot know. A pair is
+built by adding two markers and handing them to `createPairFromMarkers`, the only
+public way in: `PairManager` is module-private. A failed pairing deletes both, or a
+retry would pile up strays whose ids the agent never saw.
+
+Three facts are stated in the tool descriptions, because none is discoverable by
+trying: `timeSec` counts from the start of the capture; a capture has to exist
+first; and Logic 2 only annotates a capture that has finished. Without the first an
+agent guesses at wall-clock time, without the second it reads an empty result as
+"no markers" rather than "no capture", and without the third it reads a mid-capture
+refusal as a broken tool.
+
+That last one is Logic 2's own rule, not one imposed here. `canAddAnnotations` is
+`captureFinished` for a non-MSO device, so the app itself will not annotate a
+running capture; these tools refuse on the same terms rather than writing through
+the check, since a marker created in a state Logic 2 never creates one in is not a
+state worth discovering later. Only an explicit `false` refuses, so a build that
+drops the property keeps working.
+
+Only colours Logic 2 can render are offered. `MarkerManager.color` is a key into
+its own colour map and the sidebar renders `darkColors[color]`, so an unknown name
+does not fail -- it resolves to `undefined` and the colour is silently dropped. An
+enum entry that does nothing is worse than a shorter enum, so the eleven offered
+were checked against that map's 101 keys: the six Logic 2 cycles through itself
+(`paleRed`, `green2`, `purple2`, `orange2`, `fuchsia`, `lightBlue`) plus `red`,
+`green`, `orange`, `purple`, `yellow`. Three names offered before this check --
+`blue`, `pink`, `teal` -- were not in the map at all.
 
 ### How it reaches the renderer
 
@@ -157,10 +189,18 @@ collide over it, and it binds loopback only.
 ### What this depends on, and what breaks it
 
 `rapidDataStore.activeSession.markers.addMarker` is Logic 2's internal shape, not
-a published API. A Logic 2 release that moves it will break these four tools and
+a published API. A Logic 2 release that moves it will break these five tools and
 nothing else -- the fifteen forwarded tools are untouched by this. Every failure
 says which step failed, so a moved store reports "this Logic 2 version may have
 moved it" rather than returning an empty list.
+
+The shape does not have to be guessed at, though, and should not be. Logic 2 ships
+its own TypeScript sources as a source map inside `app.asar`
+(`dist/logic/bundle.js.map`, ~3200 files). The marker layer is
+`app/services/timingMarkers/` -- `Store.ts`, `BaseManager.ts`, `MarkerManager.ts`,
+`PairManager.ts` -- and the MCP layer is `app/services/mcp/`. Read those before
+changing anything here. Every correction in this section came from doing that after
+the fact rather than before.
 
 Two consequences worth stating plainly:
 
@@ -182,9 +222,17 @@ default, so silence there would have meant a dialog per note.
 The CDP transport is verified against a local stand-in for Chromium's debugging
 port: handshake, target selection, frames split across reads, evaluation
 round-trip, an exception inside the page, a protocol error, an unanswered
-request, a port with no renderer target, and a closed port. The marker layer is
-verified with a stubbed renderer, including that a note carrying quotes and a
-comment arrives as data rather than executing.
+request, a port with no renderer target, and a closed port.
+
+The marker expressions are verified by running them against a stand-in page rather
+than by matching their text: a fake `#root` carrying a React container key whose
+provider props hold a fake store, so the fiber walk and the annotation gate are both
+under test rather than substituted away. That covers a note carrying quotes and a
+comment arriving as data instead of executing (with `alert` bound, so a break-out
+would run rather than throw a reference error that could be mistaken for success),
+the gate refusing a running capture and allowing a finished one, a build without the
+gate property still working, a pair reporting its duration, and a failed pairing
+leaving no strays.
 
 **Verified against a running Logic 2 2.4.46**, PXLogic on `usb:16c0:05dc`, after a
 capture had finished:
@@ -192,13 +240,18 @@ capture had finished:
 - the debugging port answered and exposed exactly one page target, whose title was
   the ordinary capture window (`Logic 2 [Logic Pro 16 - Demo] [Session 0]`);
 - no DevTools window appeared and no `devtools://` target existed;
-- `add` / `list` / `set note` / `remove` completed in order, with the marker count
-  returning to its starting value;
+- the store was reached in 56 fibers, reporting `canAddAnnotations: true` and
+  `captureState: "Finished"`;
+- `add` / `add pair` / `list` / `set note` / `remove` completed in order, with both
+  the marker and pair counts returning to their starting values;
+- a pair spanning 0.8s..1.4s reported `durationSec` 0.6;
 - a note carrying `"` and `\` round-tripped intact, as did Chinese text;
-- `tools/list` through the proxy returned 19 tools: Logic 2's 15 plus these 4.
+- `tools/list` through the proxy returned 20 tools: Logic 2's 15 plus these 5, with
+  the corrected colour enum on both writing tools.
 
-Two assumptions were wrong and were corrected by that run, both worth recording
-because they are exactly the kind of thing a Logic 2 upgrade can change again:
+Assumptions this work started from that turned out to be wrong, each corrected by
+either that run or by reading Logic 2's own sources, and each worth recording
+because they are the kind of thing a Logic 2 upgrade can change again:
 
 - **`window.__saleaeTest` does not exist in the shipped build.** It is in the
   bundle, and would have been the steadier route, but it is not installed. The
@@ -207,11 +260,30 @@ because they are exactly the kind of thing a Logic 2 upgrade can change again:
   the `__reactContainer$` / `__reactFiber$` of later versions. The store is a
   context value, so it is found on a provider's `memoizedProps.value` rather than
   on any component instance -- about sixty fibers from the root.
+- **Three of the eight colours first offered did not exist.** `blue`, `pink` and
+  `teal` are not keys in Logic 2's colour map, so they resolved to `undefined` and
+  were dropped without complaint. The first live run happened to use `red`, which is
+  a real key, so the fault stayed hidden; a marker carrying `teal` was still sitting
+  in the sidebar when the sources were read.
+- **Pairs were missed entirely.** `list_timing_markers` read only the `markers` map,
+  so a capture holding a pair reported as empty -- an agent reads that as "nothing is
+  annotated", which is worse than an error.
+- **Logic 2's own annotation gate was being written through.** `canAddAnnotations`
+  refuses a running capture and this did not.
+- **Shadowing held on the listing but not on dispatch.** `tools/list` gave an
+  upstream name precedence while `tools/call` matched on name alone, so a future
+  official marker tool would have been listed with its schema and called into this
+  implementation.
 
 **Still not verified: the tool call path through a Bridge session the Tauri client
 started.** The renderer half was driven directly, and the proxy half was driven
-over HTTP, but the client has no command-line entry point, so starting a session
-the way a user does needs the window. Against a session the client does not own,
-the tools correctly report `Bridge 未在运行` as a tool error rather than hanging.
-Before release, start the Bridge from the window and confirm one marker call
-completes through the full chain.
+over HTTP against the running client -- which answered `tools/list` with all twenty
+-- but the client has no command-line entry point, so starting a session the way a
+user does needs the window. Against a session the client does not own, the tools
+correctly report `Bridge 未在运行` as a tool error rather than hanging. Before
+release, start the Bridge from the window and confirm one marker call completes
+through the full chain.
+
+Shadowing is verified through a real proxy with a stand-in upstream that claims the
+same tool name, rather than live: making Logic 2 advertise `add_timing_marker` is
+not something this side can arrange.

@@ -15,14 +15,17 @@
 const { connectRenderer } = require('./renderer-bridge.cjs');
 const {
   addMarkerExpression,
+  addMarkerPairExpression,
   listMarkersExpression,
   removeMarkerExpression,
   setMarkerNoteExpression,
   validateMarkerRequest,
+  validatePairRequest,
 } = require('./renderer-markers.cjs');
 
 const MARKER_COMMAND_TYPES = new Set([
   'add-timing-marker',
+  'add-timing-marker-pair',
   'list-timing-markers',
   'remove-timing-marker',
   'set-timing-marker-note',
@@ -74,9 +77,18 @@ class MarkerCommandService {
         const session = await this._session();
         return { ok: true, marker: await session.evaluate(addMarkerExpression(validated)) };
       }
+      case 'add-timing-marker-pair': {
+        const validated = validatePairRequest(command);
+        if (validated.error) return { ok: false, error: validated.error };
+        const session = await this._session();
+        return { ok: true, pair: await session.evaluate(addMarkerPairExpression(validated)) };
+      }
       case 'list-timing-markers': {
         const session = await this._session();
-        return { ok: true, markers: await session.evaluate(listMarkersExpression()) };
+        // The renderer answers with both maps; they are reported as it sent them so a
+        // capture holding only pairs does not read as an empty one.
+        const listed = await session.evaluate(listMarkersExpression());
+        return { ok: true, markers: listed?.markers ?? [], pairs: listed?.pairs ?? [] };
       }
       case 'remove-timing-marker': {
         const id = Number(command.id);

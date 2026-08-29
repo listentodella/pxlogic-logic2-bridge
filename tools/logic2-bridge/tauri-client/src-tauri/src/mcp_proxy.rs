@@ -125,6 +125,14 @@ pub trait ProxyObserver: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Option<serde_json::Value>> + Send + 'a>> {
         Box::pin(async { None })
     }
+    /// The tool names the upstream server advertises, taken from a `tools/list` reply
+    /// before any local tool is merged into it.
+    ///
+    /// This is what lets the two halves of shadowing agree. `merge_local_tools` drops a
+    /// local tool whose name upstream already serves, so the agent reads Logic 2's
+    /// schema; without this the dispatch above would still answer that name locally, and
+    /// the agent would be calling an implementation it never saw the schema for.
+    fn observe_upstream_tools(&self, _names: &[String]) {}
 }
 
 /// A `tools/call` awaiting a decision.
@@ -314,6 +322,11 @@ async fn handle(request: Request<Incoming>, runtime: Arc<ProxyRuntime>) -> Respo
                 let payload = match body.collect().await {
                     Ok(collected) => {
                         let upstream_body = collected.to_bytes();
+                        // Reported from the unmerged reply, which is the only point where
+                        // upstream's own names are still distinguishable from ours.
+                        runtime
+                            .observer
+                            .observe_upstream_tools(&upstream_tool_names(&upstream_body));
                         merge_local_tools(&upstream_body, &local_tools)
                             .unwrap_or_else(|| upstream_body.to_vec())
                     }
@@ -662,6 +675,27 @@ pub fn json_response(status: StatusCode, body: Vec<u8>) -> Response<ProxyBody> {
 /// on its own tools and a version that adds one needs no change here. A body that is
 /// not a tool list is returned untouched: guessing at an unexpected shape would be
 /// worse than forwarding it.
+/// Reads the tool names out of a `tools/list` reply.
+///
+/// Only meaningful on an unmerged upstream body: once local tools are in the array, the
+/// two are indistinguishable, which is the whole reason this is called where it is.
+pub fn upstream_tool_names(body: &[u8]) -> Vec<String> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    value
+        .get("result")
+        .and_then(|result| result.get("tools"))
+        .and_then(|tools| tools.as_array())
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.get("name")?.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn merge_local_tools(body: &[u8], local: &[serde_json::Value]) -> Option<Vec<u8>> {
     if local.is_empty() {
         return None;
@@ -969,6 +1003,25 @@ mod tests {
     }
 
     #[test]
+    fn upstream_names_are_read_from_the_unmerged_reply() {
+        // What makes the two halves of shadowing agree: the listing suppresses a local
+        // tool whose name upstream serves, and dispatch needs the same set to stop
+        // answering that name locally. It is only knowable before the merge -- afterwards
+        // the array holds both and they are indistinguishable.
+        let upstream = br#"{"result":{"tools":[{"name":"get_devices"},{"name":"start_capture"}]}}"#;
+        assert_eq!(
+            upstream_tool_names(upstream),
+            vec!["get_devices".to_string(), "start_capture".to_string()]
+        );
+        // A reply that carries no catalogue must not be read as "upstream serves nothing
+        // and everything is ours" -- but an empty list is the honest answer here, because
+        // the caller only ever replaces the set from a real tools/list reply.
+        assert!(upstream_tool_names(b"not json").is_empty());
+        assert!(upstream_tool_names(br#"{"error":{"code":-1}}"#).is_empty());
+        assert!(upstream_tool_names(br#"{"result":{"tools":[{"noName":1}]}}"#).is_empty());
+    }
+
+    #[test]
     fn merging_nothing_leaves_the_catalogue_untouched() {
         let upstream = br#"{"result":{"tools":[{"name":"get_devices"}]}}"#;
         assert!(merge_local_tools(upstream, &[]).is_none());
@@ -977,6 +1030,8 @@ mod tests {
     #[derive(Default)]
     struct LocalToolObserver {
         served: Mutex<Vec<String>>,
+        /// What the proxy reported as upstream's own names, in call order.
+        upstream_seen: Mutex<Vec<Vec<String>>>,
     }
 
     impl ProxyObserver for LocalToolObserver {
@@ -995,11 +1050,24 @@ mod tests {
                 if call.tool != "add_timing_marker" {
                     return None;
                 }
+                // Mirrors the real host: a name upstream serves is forwarded, not answered.
+                let shadowed = self
+                    .upstream_seen
+                    .lock()
+                    .unwrap()
+                    .last()
+                    .is_some_and(|names| names.contains(&call.tool));
+                if shadowed {
+                    return None;
+                }
                 self.served.lock().unwrap().push(call.tool.clone());
                 Some(serde_json::json!({
                     "content": [{"type":"text","text":"{\"id\":4}"}],
                 }))
             })
+        }
+        fn observe_upstream_tools(&self, names: &[String]) {
+            self.upstream_seen.lock().unwrap().push(names.to_vec());
         }
     }
 
@@ -1046,6 +1114,57 @@ mod tests {
                 .map(|tool| tool["name"].as_str().unwrap())
                 .collect();
             assert_eq!(names, vec!["get_devices", "add_timing_marker"]);
+        });
+    }
+
+    #[test]
+    fn a_name_logic_2_serves_is_forwarded_even_when_this_host_has_one_too() {
+        // The bug this covers: the listing gave upstream precedence while dispatch matched
+        // on name alone, so an agent could read Logic 2's schema and reach our
+        // implementation. The proxy reports upstream's own names, and dispatch yields.
+        runtime().block_on(async {
+            let observer = Arc::new(LocalToolObserver::default());
+            let served = Arc::clone(&observer);
+            let (port, recorder) = proxy_in_front_of_observer(
+                |recorder| {
+                    // The stand-in answers a tool list claiming the same name, then a call.
+                    let request = String::from_utf8_lossy(&recorder.body.lock().unwrap()).to_string();
+                    let body = if request.contains("tools/list") {
+                        br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"add_timing_marker","description":"official"}]}}"#.as_slice()
+                    } else {
+                        br#"{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"official answer"}]}}"#.as_slice()
+                    };
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(body_of(body))
+                        .unwrap()
+                },
+                observer,
+            )
+            .await;
+
+            // The list is what teaches the host whose name it is; only Logic 2's survives.
+            let listed =
+                post_through(port, br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await;
+            let value: serde_json::Value = serde_json::from_slice(&listed).unwrap();
+            let tools = value["result"]["tools"].as_array().unwrap();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0]["description"], "official");
+            assert_eq!(
+                served.upstream_seen.lock().unwrap().last().unwrap(),
+                &vec!["add_timing_marker".to_string()]
+            );
+
+            let response = post_through(
+                port,
+                br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"add_timing_marker","arguments":{"timeSec":1}}}"#,
+            )
+            .await;
+            let value: serde_json::Value = serde_json::from_slice(&response).unwrap();
+            assert_eq!(value["result"]["content"][0]["text"], "official answer");
+            // Answered upstream, not here, so schema and implementation are the same one.
+            assert!(served.served.lock().unwrap().is_empty());
+            assert!(!recorder.body.lock().unwrap().is_empty());
         });
     }
 
