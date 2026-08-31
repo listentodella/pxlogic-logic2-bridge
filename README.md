@@ -71,3 +71,7 @@ TAURI_CONFIG='{"bundle":{"resources":[]}}' \
 
 Use the GitHub Actions workflow for platform-specific helper/native-host
 payloads and packaged applications.
+
+
+---
+Thanks：[linuxdo](https://linux.do)
